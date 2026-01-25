@@ -28,6 +28,7 @@ class MinecraftModernGL:
         self.last_x = width / 2
         self.last_y = height / 2
         self.first_mouse = True
+        self.start_time = time.time()
         
         # Movement
         self.movement_speed = 20.0
@@ -315,6 +316,10 @@ class MinecraftModernGL:
         view_matrix = self.camera.get_view_matrix()
         model_matrix = glm.mat4(1.0)
         self.renderer.update_matrices(view_matrix, model_matrix)
+        
+        # Render Sky (Background)
+        elapsed_time = time.time() - self.start_time
+        self.renderer.render_sky(view_matrix, elapsed_time)
         
         # Render chunks using chunk manager with frustum and occlusion culling
         rendered_chunks, total_chunks, frustum_culled, occlusion_culled = self.chunk_manager.render_chunks(

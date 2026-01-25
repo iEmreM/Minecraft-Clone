@@ -3,6 +3,7 @@ import pygame as pg
 import numpy as np
 from engine.shader_manager import ShaderManager
 from engine.water_surface import WaterSurface
+from engine.sky import SkyRenderer
 import glm
 import math
 
@@ -50,6 +51,9 @@ class ModernGLRenderer:
         # Initialize water surface
         self.water_surface = WaterSurface(self)
         
+        # Initialize sky renderer
+        self.sky_renderer = SkyRenderer(self.ctx, self.shader_manager)
+        
         # Create projection matrix with proper far distance like ornek2
         self.proj_matrix = glm.perspective(
             glm.radians(65.0), 
@@ -76,8 +80,8 @@ class ModernGLRenderer:
     
     def clear(self):
         """Clear the screen with sky background color like ornek2"""
-        # Set sky color like ornek2 (light blue)
-        self.bg_color = glm.vec3(0.58, 0.83, 0.99)
+        # Set sky color to match procedural sky horizon
+        self.bg_color = glm.vec3(0.6, 0.8, 0.95)
         self.ctx.clear(color=(self.bg_color.x, self.bg_color.y, self.bg_color.z))
     
     def set_view_matrix(self, view_matrix):
@@ -253,6 +257,11 @@ class ModernGLRenderer:
             if water_program:
                 water_program['u_texture_0'] = 1
     
+    def render_sky(self, view_matrix, time):
+        """Render the sky background"""
+        if hasattr(self, 'sky_renderer'):
+            self.sky_renderer.render(view_matrix, self.proj_matrix, time)
+            
     def render_water_surface(self, view_matrix, camera_pos):
         """Render the water surface plane"""
         if self.water_surface:
