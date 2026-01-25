@@ -18,6 +18,10 @@ class ModernGLRenderer:
         pg.display.gl_set_attribute(pg.GL_CONTEXT_PROFILE_MASK, pg.GL_CONTEXT_PROFILE_CORE)
         pg.display.gl_set_attribute(pg.GL_DEPTH_SIZE, 24)
         
+        # Enable MSAA (Anti-Aliasing)
+        pg.display.gl_set_attribute(pg.GL_MULTISAMPLEBUFFERS, 1)
+        pg.display.gl_set_attribute(pg.GL_MULTISAMPLESAMPLES, 4)
+        
         # Create display
         self.screen = pg.display.set_mode((width, height), pg.OPENGL | pg.DOUBLEBUF | pg.RESIZABLE)
         pg.display.set_caption('Minecraft Clone - ModernGL')
