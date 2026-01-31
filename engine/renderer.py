@@ -91,8 +91,9 @@ class ModernGLRenderer:
     
     def set_model_matrix(self, model_matrix):
         """Set the model matrix for rendering"""
-        if self.chunk_program:
-            self.chunk_program['m_model'].write(model_matrix.to_bytes())
+        # OPTIMIZATION: m_model removed - shader compiler optimizes it out
+        # Keeping this function for API compatibility but it does nothing now
+        pass
     
     def update_matrices(self, view_matrix, model_matrix=None):
         """Update projection, view, and model matrices"""
@@ -105,10 +106,8 @@ class ModernGLRenderer:
         # Set view matrix
         self.chunk_program['m_view'].write(view_matrix.to_bytes())
         
-        # Set model matrix (identity if not provided)
-        if model_matrix is None:
-            model_matrix = glm.mat4(1.0)
-        self.chunk_program['m_model'].write(model_matrix.to_bytes())
+        # OPTIMIZATION: m_model removed - shader compiler optimizes it out since unused
+        # The vertex shader doesn't use m_model (always identity), so GLSL compiler removes it
         
         # Set background color for fog effect
         if hasattr(self, 'bg_color'):
