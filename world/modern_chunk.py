@@ -18,10 +18,11 @@ CHUNK_SIZE = 16
 CHUNK_HEIGHT = 256
 
 class ModernChunk:
-    def __init__(self, chunk_x, chunk_z, renderer, chunk_data=None):
+    def __init__(self, chunk_x, chunk_z, renderer, chunk_data=None, chunk_manager=None):
         self.chunk_x = chunk_x
         self.chunk_z = chunk_z
         self.renderer = renderer
+        self.chunk_manager = chunk_manager  # Reference to ThreadedChunkManager for async mesh requests
         
         # Initialize block data
         self.blocks = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=np.uint8)
@@ -45,7 +46,6 @@ class ModernChunk:
             self.load_chunk_data(chunk_data)
         else:
             self.generate_advanced_terrain()
-
     
     def generate_advanced_terrain(self):
         """Generate advanced terrain using the new terrain generator"""
@@ -311,12 +311,20 @@ class ModernChunk:
             self.needs_update = True  # Mark chunk for mesh rebuild
             self.is_modified = True   # Mark chunk as modified by player
             self.mesh_cache_valid = False  # Invalidate cache since blocks changed
+            
+            # Request async mesh rebuild if chunk_manager is available
+            if self.chunk_manager:
+                priority = self.chunk_manager._calculate_chunk_priority(self.chunk_x, self.chunk_z)
+                self.chunk_manager.mesh_request_counter += 1
+                self.chunk_manager.mesh_build_queue.put((priority, self.chunk_manager.mesh_request_counter, {
+                    'coords': (self.chunk_x, self.chunk_z),
+                    'chunk': self
+                }))
     
     def render(self):
         """Render this chunk"""
-        if self.needs_update:
-            self.build_mesh()
-        
+        # Don't build mesh here anymore - it's built asynchronously in ThreadedChunkManager
+        # Just render the VAO if it exists
         if self.vao and self.vertex_count > 0:
             self.renderer.render_vao(self.vao)
     

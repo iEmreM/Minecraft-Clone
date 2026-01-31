@@ -33,6 +33,12 @@ class ThreadedChunkManager:
         self.chunks_to_unload = queue.Queue()  # Chunks to be unloaded
         self.thread_lock = threading.Lock()
         
+        # Async mesh building queues
+        self.mesh_build_queue = queue.PriorityQueue()  # Priority queue - closer chunks processed first
+        self.completed_meshes = queue.Queue()  # Completed mesh data ready for VAO creation
+        self.player_position = glm.vec3(0, 0, 0)  # Track player position for priority calculation
+        self.mesh_request_counter = 0  # Counter for tiebreaker in priority queue
+        
         # Frustum culling
         self.frustum = Frustum()
         self.enable_frustum_culling = True
@@ -48,6 +54,7 @@ class ThreadedChunkManager:
         self.start_background_thread()
         
         print(f"ThreadedChunkManager initialized with render distance: {render_distance}")
+
     
     def pregenerate_spawn_chunks(self, spawn_x, spawn_z):
         """Pre-generate chunks around spawn position before game starts"""
@@ -71,7 +78,11 @@ class ThreadedChunkManager:
                     break
                 
                 # Generate chunk immediately (synchronously for pre-gen)
-                chunk = ModernChunk(x, z, self.renderer)
+                chunk = ModernChunk(x, z, self.renderer, chunk_data=None, chunk_manager=self)
+                
+                # Build mesh synchronously for pre-generated chunks so they're ready immediately
+                chunk.build_mesh()
+                
                 self.chunks[(x, z)] = chunk
                 self.loaded_chunks.add((x, z))
                 self.explored_chunks.add((x, z))
@@ -83,7 +94,7 @@ class ThreadedChunkManager:
                 break
         
         self.initial_chunks_generated = True
-        print(f"Pre-generation complete! Generated {generated_count} chunks.")
+        print(f"Pre-generation complete! Generated {generated_count} chunks with meshes ready.")
     
     def save_chunk_to_cache(self, chunk_x, chunk_z):
         """Save chunk data to cache before unloading"""
@@ -98,7 +109,7 @@ class ThreadedChunkManager:
         """Load chunk data from cache if available"""
         if (chunk_x, chunk_z) in self.chunk_cache:
             chunk_data = self.chunk_cache[(chunk_x, chunk_z)]
-            chunk = ModernChunk(chunk_x, chunk_z, self.renderer, chunk_data)
+            chunk = ModernChunk(chunk_x, chunk_z, self.renderer, chunk_data, chunk_manager=self)
             return chunk
         return None
     
@@ -112,7 +123,7 @@ class ThreadedChunkManager:
         self.loading_thread.start()
     
     def _chunk_worker(self):
-        """Background thread worker for chunk loading"""
+        """Background thread worker for chunk loading and mesh building"""
         while not self.should_stop:
             try:
                 # Check for chunk loading requests
@@ -125,7 +136,7 @@ class ThreadedChunkManager:
                         chunk = self.load_chunk_from_cache(chunk_x, chunk_z)
                         if chunk is None:
                             # Create new chunk if not in cache
-                            chunk = ModernChunk(chunk_x, chunk_z, self.renderer)
+                            chunk = ModernChunk(chunk_x, chunk_z, self.renderer, chunk_data=None, chunk_manager=self)
                             self.explored_chunks.add((chunk_x, chunk_z))
                         
                         # Queue it for main thread integration
@@ -139,10 +150,86 @@ class ThreadedChunkManager:
                         self.chunks_to_unload.put((chunk_x, chunk_z))
                 except queue.Empty:
                     pass
+                
+                # Check for mesh building requests (priority queue format)
+                try:
+                    priority_item = self.mesh_build_queue.get(timeout=0.01)
+                    # PriorityQueue returns (priority, counter, data) tuple
+                    priority, counter, mesh_request = priority_item
+                    chunk_coords = mesh_request['coords']
+                    chunk = mesh_request['chunk']
+                    
+                    # Build mesh in background thread
+                    from world.fast_builder import build_chunk_mesh_fast
+                    vertices_array, indices_array = build_chunk_mesh_fast(
+                        chunk.blocks, chunk.chunk_x, chunk.chunk_z
+                    )
+                    
+                    # Queue completed mesh for main thread
+                    self.completed_meshes.put({
+                        'coords': chunk_coords,
+                        'vertices': vertices_array,
+                        'indices': indices_array
+                    })
+                except queue.Empty:
+                    pass
                     
             except Exception as e:
                 print(f"Error in chunk worker thread: {e}")
                 time.sleep(0.1)
+    
+    def _calculate_chunk_priority(self, chunk_x, chunk_z):
+        """Calculate priority for chunk based on distance to player (lower = higher priority)"""
+        from world.modern_chunk import CHUNK_SIZE
+        # Calculate chunk center world position
+        chunk_center_x = (chunk_x * CHUNK_SIZE) + (CHUNK_SIZE / 2)
+        chunk_center_z = (chunk_z * CHUNK_SIZE) + (CHUNK_SIZE / 2)
+        
+        # Calculate distance to player (use 2D distance, ignore Y)
+        dx = chunk_center_x - self.player_position.x
+        dz = chunk_center_z - self.player_position.z
+        distance = math.sqrt(dx*dx + dz*dz)
+        
+        return distance  # Lower distance = higher priority
+    
+    def clear_distant_mesh_requests(self):
+        """Clear mesh requests for chunks that are now too far from player"""
+        from world.modern_chunk import CHUNK_SIZE
+        current_chunk_x = int(self.player_position.x // CHUNK_SIZE)
+        current_chunk_z = int(self.player_position.z // CHUNK_SIZE)
+        
+        # Create new queue with only relevant chunks
+        new_queue = queue.PriorityQueue()
+        cleared_count = 0
+        kept_count = 0
+        
+        # Drain existing queue
+        while True:
+            try:
+                priority_item = self.mesh_build_queue.get_nowait()
+                priority, counter, mesh_request = priority_item
+                chunk_x, chunk_z = mesh_request['coords']
+                
+                # Calculate chunk distance in chunk coordinates
+                chunk_dx = abs(chunk_x - current_chunk_x)
+                chunk_dz = abs(chunk_z - current_chunk_z)
+                
+                # Only keep chunks within render distance
+                if chunk_dx <= self.render_distance and chunk_dz <= self.render_distance:
+                    # Recalculate priority with current player position
+                    new_priority = self._calculate_chunk_priority(chunk_x, chunk_z)
+                    new_queue.put((new_priority, counter, mesh_request))
+                    kept_count += 1
+                else:
+                    cleared_count += 1
+            except queue.Empty:
+                break
+        
+        # Replace queue
+        self.mesh_build_queue = new_queue
+        
+        if cleared_count > 0:
+            print(f"Cleared {cleared_count} distant mesh requests, kept {kept_count}")
     
     def world_to_chunk_coords(self, world_x, world_z):
         """Convert world coordinates to chunk coordinates"""
@@ -195,7 +282,7 @@ class ThreadedChunkManager:
     def process_completed_chunks(self):
         """Process chunks that have been loaded in the background (call from main thread)"""
         processed = 0
-        max_per_frame = 3  # Limit processing to avoid frame drops
+        max_per_frame = 12  # Increased for faster updates when player moves quickly
         
         while processed < max_per_frame:
             try:
@@ -204,11 +291,65 @@ class ThreadedChunkManager:
                     chunk_x, chunk_z = result['coords']
                     chunk = result['chunk']
                     
+                    # Check if chunk has cached mesh - if so, create VAO immediately
+                    if chunk.mesh_cache_valid and chunk.cached_vertices is not None:
+                        # Create VAO from cached mesh on main thread
+                        vertices = chunk.cached_vertices
+                        indices = chunk.cached_indices
+                        
+                        if len(vertices) > 0:
+                            if chunk.vao:
+                                chunk.vao.release()
+                            chunk.vao = self.renderer.create_vao(vertices, indices)
+                            chunk.vertex_count = len(indices)
+                        
+                        chunk.needs_update = False
+                    elif chunk.needs_update:
+                        # No cached mesh - request mesh building in background with priority
+                        priority = self._calculate_chunk_priority(chunk_x, chunk_z)
+                        self.mesh_request_counter += 1
+                        self.mesh_build_queue.put((priority, self.mesh_request_counter, {
+                            'coords': (chunk_x, chunk_z),
+                            'chunk': chunk
+                        }))
+                    
+                    # Add chunk to loaded chunks now that it's ready (or mesh is building)
                     with self.thread_lock:
                         self.chunks[(chunk_x, chunk_z)] = chunk
                     
                     processed += 1
                     
+            except queue.Empty:
+                break
+        
+        # Process completed meshes and create VAOs (main thread only for OpenGL)
+        mesh_processed = 0
+        while mesh_processed < max_per_frame:
+            try:
+                mesh_data = self.completed_meshes.get_nowait()
+                chunk_coords = mesh_data['coords']
+                vertices = mesh_data['vertices']
+                indices = mesh_data['indices']
+                
+                # Get the chunk and create VAO on main thread
+                with self.thread_lock:
+                    if chunk_coords in self.chunks:
+                        chunk = self.chunks[chunk_coords]
+                        
+                        # Update chunk's cached mesh data
+                        chunk.cached_vertices = vertices
+                        chunk.cached_indices = indices
+                        chunk.mesh_cache_valid = True
+                        
+                        # Create VAO on main thread (OpenGL requirement)
+                        if len(vertices) > 0:
+                            if chunk.vao:
+                                chunk.vao.release()
+                            chunk.vao = self.renderer.create_vao(vertices, indices)
+                            chunk.vertex_count = len(indices)
+                        
+                        chunk.needs_update = False
+                        mesh_processed += 1
             except queue.Empty:
                 break
         
@@ -245,13 +386,28 @@ class ThreadedChunkManager:
     
     def update(self, player_pos):
         """Update chunk loading/unloading based on player position"""
+        # Update player position for mesh priority calculation
+        old_position = self.player_position
+        self.player_position = player_pos
+        
         current_chunk = self.get_player_chunk(player_pos)
         
-        # Process any completed chunks first
+        # Process any completed chunks first (increased limit for faster updates)
         loaded, unloaded = self.process_completed_chunks()
         
         # Only update if player moved to a different chunk
         if current_chunk != self.last_player_chunk:
+            # Calculate movement distance
+            if self.last_player_chunk is not None:
+                chunk_moved = max(
+                    abs(current_chunk[0] - self.last_player_chunk[0]),
+                    abs(current_chunk[1] - self.last_player_chunk[1])
+                )
+                
+                # If player moved more than 2 chunks, clear distant mesh requests
+                if chunk_moved >= 2:
+                    self.clear_distant_mesh_requests()
+            
             self.last_player_chunk = current_chunk
             
             # Get chunks that should be loaded
