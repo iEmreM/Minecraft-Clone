@@ -31,6 +31,11 @@ class ModernChunk:
         self.vertex_count = 0
         self.needs_update = True
         
+        # Mesh cache for performance optimization
+        self.cached_vertices = None
+        self.cached_indices = None
+        self.mesh_cache_valid = False
+        
         # Persistence tracking
         self.is_generated = False
         self.is_modified = False
@@ -40,6 +45,7 @@ class ModernChunk:
             self.load_chunk_data(chunk_data)
         else:
             self.generate_advanced_terrain()
+
     
     def generate_advanced_terrain(self):
         """Generate advanced terrain using the new terrain generator"""
@@ -55,7 +61,11 @@ class ModernChunk:
             'is_generated': self.is_generated,
             'is_modified': self.is_modified,
             'chunk_x': self.chunk_x,
-            'chunk_z': self.chunk_z
+            'chunk_z': self.chunk_z,
+            # Save mesh cache for faster reloading
+            'cached_vertices': self.cached_vertices,
+            'cached_indices': self.cached_indices,
+            'mesh_cache_valid': self.mesh_cache_valid
         }
     
     def load_chunk_data(self, chunk_data):
@@ -63,6 +73,10 @@ class ModernChunk:
         self.blocks = chunk_data['blocks'].copy()
         self.is_generated = chunk_data.get('is_generated', True)
         self.is_modified = chunk_data.get('is_modified', False)
+        # Restore mesh cache if available
+        self.cached_vertices = chunk_data.get('cached_vertices', None)
+        self.cached_indices = chunk_data.get('cached_indices', None)
+        self.mesh_cache_valid = chunk_data.get('mesh_cache_valid', False)
         self.needs_update = True
 
     def generate_simple_terrain(self):
@@ -96,8 +110,19 @@ class ModernChunk:
         
         from world.fast_builder import build_chunk_mesh_fast
         
-        # Call Numba function
-        vertices_array, indices_array = build_chunk_mesh_fast(self.blocks, self.chunk_x, self.chunk_z)
+        # Check if we have a valid cached mesh and can skip regeneration
+        if self.mesh_cache_valid and self.cached_vertices is not None and self.cached_indices is not None:
+            # Reuse cached mesh data - only recreate VAO
+            vertices_array = self.cached_vertices
+            indices_array = self.cached_indices
+        else:
+            # Generate new mesh using Numba function
+            vertices_array, indices_array = build_chunk_mesh_fast(self.blocks, self.chunk_x, self.chunk_z)
+            
+            # Cache the mesh data for future use
+            self.cached_vertices = vertices_array
+            self.cached_indices = indices_array
+            self.mesh_cache_valid = True
         
         # Create VAO if we have vertices
         if len(vertices_array) > 0:
@@ -285,6 +310,7 @@ class ModernChunk:
             self.blocks[x, y, z] = block_type
             self.needs_update = True  # Mark chunk for mesh rebuild
             self.is_modified = True   # Mark chunk as modified by player
+            self.mesh_cache_valid = False  # Invalidate cache since blocks changed
     
     def render(self):
         """Render this chunk"""
