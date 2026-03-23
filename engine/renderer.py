@@ -62,6 +62,10 @@ class ModernGLRenderer:
             1000.0  # Use far distance like ornek2 for proper render distance
         )
         
+        # Initialize crosshair and block outline
+        self._init_crosshair()
+        self._init_block_outline()
+        
         print("ModernGL Renderer initialized successfully")
     
     def resize(self, width, height):
@@ -276,3 +280,153 @@ class ModernGLRenderer:
             self.ctx.wireframe = True
             self.wireframe_mode = True
             print("Wireframe mode: ON")
+
+    # ------------------------------------------------------------------
+    # Crosshair
+    # ------------------------------------------------------------------
+
+    def _init_crosshair(self):
+        """Create the 2-D crosshair shader program and geometry."""
+        vert_src = """
+#version 330 core
+in vec2 in_pos;
+void main() {
+    gl_Position = vec4(in_pos, 0.0, 1.0);
+}
+"""
+        frag_src = """
+#version 330 core
+out vec4 fragColor;
+void main() {
+    fragColor = vec4(1.0, 1.0, 1.0, 1.0);
+}
+"""
+        self.crosshair_prog = self.ctx.program(
+            vertex_shader=vert_src,
+            fragment_shader=frag_src,
+        )
+        self._build_crosshair_vao()
+
+    def _build_crosshair_vao(self):
+        """Build crosshair geometry in NDC space."""
+        # Two lines: horizontal and vertical
+        # Each occupies ~2% of the half-screen width/height
+        s = 0.018   # arm half-length in NDC
+        t = 0.002   # pixel gap in centre (tiny gap like MC's crosshair)
+        verts = np.array([
+            # horizontal
+            -s,  0.0,
+            -t,  0.0,
+             t,  0.0,
+             s,  0.0,
+            # vertical
+             0.0, -s,
+             0.0, -t,
+             0.0,  t,
+             0.0,  s,
+        ], dtype=np.float32)
+        vbo = self.ctx.buffer(verts.tobytes())
+        self.crosshair_vao = self.ctx.vertex_array(
+            self.crosshair_prog,
+            [(vbo, '2f', 'in_pos')],
+        )
+
+    def render_crosshair(self):
+        """Draw a small white crosshair at the centre of the screen."""
+        # Disable depth test so it always appears on top
+        self.ctx.disable(mgl.DEPTH_TEST)
+        self.ctx.disable(mgl.CULL_FACE)
+
+        # Make lines a bit thicker so they are clearly visible
+        self.ctx.line_width = 2.0
+
+        self.crosshair_vao.render(mgl.LINES)
+
+        # Restore state
+        self.ctx.enable(mgl.DEPTH_TEST)
+        self.ctx.enable(mgl.CULL_FACE)
+        self.ctx.line_width = 1.0
+
+    # ------------------------------------------------------------------
+    # Block outline
+    # ------------------------------------------------------------------
+
+    def _init_block_outline(self):
+        """Create the 3-D block-outline shader program and geometry."""
+        vert_src = """
+#version 330 core
+in vec3 in_pos;
+uniform mat4 m_proj;
+uniform mat4 m_view;
+uniform mat4 m_model;
+void main() {
+    gl_Position = m_proj * m_view * m_model * vec4(in_pos, 1.0);
+}
+"""
+        frag_src = """
+#version 330 core
+out vec4 fragColor;
+void main() {
+    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+}
+"""
+        self.outline_prog = self.ctx.program(
+            vertex_shader=vert_src,
+            fragment_shader=frag_src,
+        )
+
+        # Unit cube, slightly expanded by eps so it sits just outside the block
+        eps = 0.005
+        lo = 0.0 - eps
+        hi = 1.0 + eps
+        # 12 edges  x  2 vertices = 24 vertices
+        edges = [
+            # bottom face
+            lo, lo, lo,  hi, lo, lo,
+            hi, lo, lo,  hi, lo, hi,
+            hi, lo, hi,  lo, lo, hi,
+            lo, lo, hi,  lo, lo, lo,
+            # top face
+            lo, hi, lo,  hi, hi, lo,
+            hi, hi, lo,  hi, hi, hi,
+            hi, hi, hi,  lo, hi, hi,
+            lo, hi, hi,  lo, hi, lo,
+            # vertical edges
+            lo, lo, lo,  lo, hi, lo,
+            hi, lo, lo,  hi, hi, lo,
+            hi, lo, hi,  hi, hi, hi,
+            lo, lo, hi,  lo, hi, hi,
+        ]
+        verts = np.array(edges, dtype=np.float32)
+        vbo = self.ctx.buffer(verts.tobytes())
+        self.outline_vao = self.ctx.vertex_array(
+            self.outline_prog,
+            [(vbo, '3f', 'in_pos')],
+        )
+
+    def render_block_outline(self, block_pos, view_matrix, proj_matrix):
+        """Draw a black wireframe outline around the block at *block_pos*.
+
+        *block_pos* is a tuple/list of three integers (world coordinates).
+        """
+        x, y, z = block_pos
+        model = glm.translate(glm.mat4(1.0), glm.vec3(x - 0.005, y - 0.005, z - 0.005))
+
+        self.outline_prog['m_proj'].write(proj_matrix.to_bytes())
+        self.outline_prog['m_view'].write(view_matrix.to_bytes())
+        self.outline_prog['m_model'].write(model.to_bytes())
+
+        # Draw on top of the block without z-fighting
+        self.ctx.disable(mgl.CULL_FACE)
+        self.ctx.enable(mgl.DEPTH_TEST)
+        self.ctx.line_width = 2.0
+
+        # Slightly pull the lines toward the camera to avoid z-fighting
+        self.ctx.enable(mgl.BLEND)
+        self.ctx.blend_func = mgl.SRC_ALPHA, mgl.ONE_MINUS_SRC_ALPHA
+
+        self.outline_vao.render(mgl.LINES)
+
+        # Restore
+        self.ctx.enable(mgl.CULL_FACE)
+        self.ctx.line_width = 1.0

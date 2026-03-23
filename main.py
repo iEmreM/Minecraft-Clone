@@ -334,6 +334,15 @@ class MinecraftModernGL:
         # Render water surface after chunks (for proper transparency)
         self.renderer.render_water_surface(view_matrix, self.camera.position)
         
+        # Block outline – draw around the block the player is looking at
+        raycast_result = self.raycast()
+        if raycast_result['hit']:
+            self.renderer.render_block_outline(
+                raycast_result['block_pos'], view_matrix, self.renderer.proj_matrix)
+        
+        # HUD: crosshair on top of everything
+        self.renderer.render_crosshair()
+        
         # Swap buffers
         pg.display.flip()
     
