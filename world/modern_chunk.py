@@ -12,6 +12,8 @@ SNOW = 5
 LEAVES = 6
 WOOD = 7
 WATER = 8
+STONE_BRICK = 9
+BRICK = 10
 
 # Chunk settings
 CHUNK_SIZE = 16
@@ -192,7 +194,7 @@ class ModernChunk:
                 'all': (1, 2)       # Sand texture
             },
             SNOW: {   # SNOW = 5
-                'all': (3, 3)       # Snow texture
+                'all': (3, 0)       # Snow texture
             },
             LEAVES: { # LEAVES = 6
                 'all': (1, 0)       # Leaves texture
@@ -202,6 +204,12 @@ class ModernChunk:
             },
             WATER: {  # WATER = 8
                 'all': (3, 0)       # Water texture (transparent blue)
+            },
+            STONE_BRICK: {  # STONE_BRICK = 9
+                'all': (2, 2)       # Stone brick texture
+            },
+            BRICK: {  # BRICK = 10
+                'all': (2, 3)       # Red brick texture
             }
         }
         

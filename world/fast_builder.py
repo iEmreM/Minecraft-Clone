@@ -162,6 +162,8 @@ def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_typ
     LEAVES = 6
     WOOD = 7
     WATER = 8
+    STONE_BRICK = 9
+    BRICK = 10
     
     if block_type == GRASS:
         if face_id == 0: tex_x, tex_y = 1, 3
@@ -170,12 +172,14 @@ def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_typ
     elif block_type == DIRT: tex_x, tex_y = 0, 2
     elif block_type == STONE: tex_x, tex_y = 0, 1
     elif block_type == SAND: tex_x, tex_y = 1, 2
-    elif block_type == SNOW: tex_x, tex_y = 3, 3
+    elif block_type == SNOW: tex_x, tex_y = 3, 0
     elif block_type == LEAVES: tex_x, tex_y = 1, 0
     elif block_type == WOOD:
         if face_id == 0 or face_id == 1: tex_x, tex_y = 0, 0
         else: tex_x, tex_y = 2, 1
     elif block_type == WATER: tex_x, tex_y = 3, 0
+    elif block_type == STONE_BRICK: tex_x, tex_y = 2, 2
+    elif block_type == BRICK: tex_x, tex_y = 2, 3
 
     # Calculate layer index (row-major 4x4)
     # Assumes create_texture_array iterates y then x

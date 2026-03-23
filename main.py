@@ -3,10 +3,11 @@ import sys
 import time
 from engine.renderer import ModernGLRenderer
 from engine.camera import Camera
-from world.modern_chunk import ModernChunk, CHUNK_SIZE, CHUNK_HEIGHT, AIR, GRASS, DIRT, STONE, SAND, SNOW, LEAVES, WOOD, WATER
+from world.modern_chunk import ModernChunk, CHUNK_SIZE, CHUNK_HEIGHT, AIR, GRASS, DIRT, STONE, SAND, SNOW, LEAVES, WOOD, WATER, STONE_BRICK, BRICK
 from world.threaded_chunk_manager import ThreadedChunkManager
 import glm
 import math
+from engine.hud import HUDRenderer, HOTBAR_BLOCKS
 
 
 class MinecraftModernGL:
@@ -36,7 +37,8 @@ class MinecraftModernGL:
         
         # Block interaction
         self.block_reach = 8.0  # How far the player can reach
-        self.selected_block_type = 1  # GRASS by default
+        self.selected_block_type = GRASS  # GRASS by default
+        self.hotbar_slot = 0              # Active hotbar slot (0-based)
         
         # World state with threaded chunk manager
         self.render_distance = 6  # Configurable render distance
@@ -50,6 +52,9 @@ class MinecraftModernGL:
         
         # Load texture
         self.load_texture()
+        
+        # HUD / hotbar (must be created after renderer/ctx is ready)
+        self.hud = HUDRenderer(self.renderer.ctx, 1200, 800)
         
         print("Minecraft ModernGL initialized successfully!")
         print("Controls:")
@@ -120,23 +125,33 @@ class MinecraftModernGL:
             elif event.type == pg.KEYDOWN:
                 if event.key == pg.K_ESCAPE:
                     self.toggle_mouse_capture()
-                # Block selection
                 elif event.key == pg.K_1:
-                    self.selected_block_type = GRASS
+                    self.hotbar_slot = 0
+                    self.selected_block_type = HOTBAR_BLOCKS[0]
                 elif event.key == pg.K_2:
-                    self.selected_block_type = DIRT
+                    self.hotbar_slot = 1
+                    self.selected_block_type = HOTBAR_BLOCKS[1]
                 elif event.key == pg.K_3:
-                    self.selected_block_type = STONE
+                    self.hotbar_slot = 2
+                    self.selected_block_type = HOTBAR_BLOCKS[2]
                 elif event.key == pg.K_4:
-                    self.selected_block_type = SAND
+                    self.hotbar_slot = 3
+                    self.selected_block_type = HOTBAR_BLOCKS[3]
                 elif event.key == pg.K_5:
-                    self.selected_block_type = SNOW
+                    self.hotbar_slot = 4
+                    self.selected_block_type = HOTBAR_BLOCKS[4]
                 elif event.key == pg.K_6:
-                    self.selected_block_type = LEAVES
+                    self.hotbar_slot = 5
+                    self.selected_block_type = HOTBAR_BLOCKS[5]
                 elif event.key == pg.K_7:
-                    self.selected_block_type = WOOD
+                    self.hotbar_slot = 6
+                    self.selected_block_type = HOTBAR_BLOCKS[6]
                 elif event.key == pg.K_8:
-                    self.selected_block_type = WATER
+                    self.hotbar_slot = 7
+                    self.selected_block_type = HOTBAR_BLOCKS[7]
+                elif event.key == pg.K_9:
+                    self.hotbar_slot = 8
+                    self.selected_block_type = HOTBAR_BLOCKS[8]
                 # Render distance controls
                 elif event.key == pg.K_EQUALS or event.key == pg.K_KP_PLUS:  # + key
                     new_distance = min(self.render_distance + 1, 96)  # Max 96 chunks
@@ -178,8 +193,13 @@ class MinecraftModernGL:
                 if self.mouse_captured:
                     self.process_mouse_movement(event.rel[0], -event.rel[1])
             
+            elif event.type == pg.MOUSEWHEEL:
+                self.hotbar_slot = (self.hotbar_slot - event.y) % len(HOTBAR_BLOCKS)
+                self.selected_block_type = HOTBAR_BLOCKS[self.hotbar_slot]
+            
             elif event.type == pg.VIDEORESIZE:
                 self.renderer.resize(event.w, event.h)
+                self.hud.resize(event.w, event.h)
     
     def capture_mouse(self):
         """Capture the mouse for camera control"""
@@ -236,24 +256,9 @@ class MinecraftModernGL:
             if keys[pg.K_LSHIFT]:
                 self.camera.position.y -= self.movement_speed * self.delta_time
         
-        # Block type selection
-        if keys[pg.K_1]:
-            self.selected_block_type = GRASS
-        if keys[pg.K_2]:
-            self.selected_block_type = DIRT
-        if keys[pg.K_3]:
-            self.selected_block_type = STONE
-        if keys[pg.K_4]:
-            self.selected_block_type = SAND
-        if keys[pg.K_5]:
-            self.selected_block_type = SNOW
-        if keys[pg.K_6]:
-            self.selected_block_type = LEAVES
-        if keys[pg.K_7]:
-            self.selected_block_type = WOOD
-        
-        # Render distance controls - check for key press events, not held keys
-        # These need to be handled in handle_events instead
+        # Block type selection — kept in sync with hotbar slot (handled in handle_events)
+        # These are left here as no-ops so existing key handling in handle_events is the source of truth.
+        pass
     
     def update(self):
         """Update game state"""
@@ -280,7 +285,11 @@ class MinecraftModernGL:
         # Update window title with FPS and camera position
         fps = self.clock.get_fps()
         pos = self.camera.position
-        block_names = {GRASS: "Grass", DIRT: "Dirt", STONE: "Stone", SAND: "Sand", SNOW: "Snow", LEAVES: "Leaves", WOOD: "Wood", WATER: "Water"}
+        block_names = {
+            GRASS: "Grass", DIRT: "Dirt", STONE: "Stone", SAND: "Sand",
+            SNOW: "Snow", LEAVES: "Leaves", WOOD: "Wood", WATER: "Water",
+            STONE_BRICK: "Stone Brick", BRICK: "Brick"
+        }
         selected_name = block_names.get(self.selected_block_type, "Unknown")
         chunk_info = self.chunk_manager.get_chunk_info()
         chunks_loaded = chunk_info['loaded_chunks']
@@ -342,6 +351,9 @@ class MinecraftModernGL:
         
         # HUD: crosshair on top of everything
         self.renderer.render_crosshair()
+        
+        # Draw hotbar via OpenGL overlay
+        self.hud.render(self.hotbar_slot, self.renderer.block_texture)
         
         # Swap buffers
         pg.display.flip()
