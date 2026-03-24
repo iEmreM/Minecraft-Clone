@@ -65,7 +65,7 @@ TREE_HEIGHT = 6
 TREE_WIDTH = 2
 TREE_H_WIDTH = 1
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def fast_rand(x, y, z):
     """Deterministic random float between 0.0 and 1.0 based on coordinates"""
     # Simple hash based random
@@ -73,7 +73,7 @@ def fast_rand(x, y, z):
     n = (n ^ (n >> 13)) * 1274126177
     return ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 2147483647.0
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def get_terrain_height(world_x, world_z):
     """
     Generate terrain height using simplified version without extreme island mask
@@ -111,7 +111,7 @@ def get_terrain_height(world_x, world_z):
     
     return int(max(height, 8.0))
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def get_block_type(world_x, world_y, world_z, terrain_height):
     """
     Determine block type based on position and terrain height (from ornek2)
@@ -153,7 +153,7 @@ def get_block_type(world_x, world_y, world_z, terrain_height):
         else:
             return STONE  # Very low/underground defaults to stone
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def should_place_tree(world_x, world_y, world_z, block_type):
     """
     Determine if a tree should be placed at this location (from ornek2)
@@ -170,7 +170,7 @@ def should_place_tree(world_x, world_y, world_z, block_type):
     rnd = fast_rand(world_x, world_y, world_z)
     return rnd <= TREE_PROBABILITY
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def generate_tree_fast(blocks, local_x, local_y, local_z):
     """
     Generate a tree structure (Numba optimized)
@@ -261,7 +261,7 @@ def generate_tree_fast(blocks, local_x, local_y, local_z):
     if top_y < CHUNK_HEIGHT:
         blocks[local_x, top_y, local_z] = LEAVES
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def generate_chunk_fast(chunk_x, chunk_z, blocks):
     """
     Main chunk generation function (JIT compiled)

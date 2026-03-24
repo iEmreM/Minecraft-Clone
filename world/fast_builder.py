@@ -8,7 +8,7 @@ CHUNK_HEIGHT = 256
 AIR = 0
 WATER = 8
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def is_block_solid(blocks, x, y, z):
     """
     Check if a block is solid (not air) for AO calculation
@@ -17,7 +17,7 @@ def is_block_solid(blocks, x, y, z):
         return False
     return blocks[x, y, z] != AIR
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def get_optimized_ao(blocks, x, y, z, face_id):
     """
     Optimized AO calculation with reduced neighbor sampling (3 instead of 5)
@@ -81,7 +81,7 @@ def get_optimized_ao(blocks, x, y, z, face_id):
         return 0.4
     return val
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_type, blocks):
     """
     Generate vertices for a greedy quad with Texture Array support
@@ -93,7 +93,7 @@ def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_typ
     bx, by, bz = world_x + x, y, world_z + z
     
     # Quad structure: 4 vertices * 7 attributes (x,y,z, u,v,layer, shading)
-    result = np.zeros(28, dtype=np.float32)
+    result = np.empty(28, dtype=np.float32)
     
     x_min, y_min, z_min = bx, by, bz
     x_max, y_max, z_max = bx, by, bz
@@ -192,18 +192,15 @@ def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_typ
     u_max = float(width)
     v_max = float(height)
     
-    u = np.zeros(4, dtype=np.float32)
-    v = np.zeros(4, dtype=np.float32)
-    
     if face_id == 0: # Top Face: xmin,zmin -> xmin,zmax -> xmax,zmax -> xmax,zmin
-        u[:] = [u_min, u_min, u_max, u_max]
-        v[:] = [v_min, v_max, v_max, v_min]
+        u_vals = (u_min, u_min, u_max, u_max)
+        v_vals = (v_min, v_max, v_max, v_min)
     elif face_id == 1: # Bottom Face: xmin,zmin -> xmax,zmin -> xmax,zmax -> xmin,zmax
-        u[:] = [u_min, u_max, u_max, u_min]
-        v[:] = [v_min, v_min, v_max, v_max]
+        u_vals = (u_min, u_max, u_max, u_min)
+        v_vals = (v_min, v_min, v_max, v_max)
     else: # Sides (Flipped V)
-        u[:] = [u_min, u_max, u_max, u_min]
-        v[:] = [v_max, v_max, v_min, v_min]
+        u_vals = (u_min, u_max, u_max, u_min)
+        v_vals = (v_max, v_max, v_min, v_min)
 
     ao = get_optimized_ao(blocks, x, y, z, face_id)
     final_shading = shading * ao
@@ -213,14 +210,14 @@ def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_typ
         result[base] = vx[i]
         result[base+1] = vy[i]
         result[base+2] = vz[i]
-        result[base+3] = u[i]
-        result[base+4] = v[i]
+        result[base+3] = u_vals[i]
+        result[base+4] = v_vals[i]
         result[base+5] = layer # Texture Layer
         result[base+6] = final_shading
         
     return result
 
-@njit
+@njit(nogil=True, fastmath=True, cache=True)
 def build_chunk_mesh_fast(blocks, chunk_x, chunk_z):
     """
     Fast chunk mesh builder using Greedy Meshing (Texture Array version)
@@ -228,8 +225,8 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z):
     """
     max_faces = 20000 
     # 7 floats per vertex now (pos3 + uv3 + shading1)
-    vertices = np.zeros(max_faces * 4 * 7, dtype=np.float32)
-    indices = np.zeros(max_faces * 6, dtype=np.uint32)
+    vertices = np.empty(max_faces * 4 * 7, dtype=np.float32)
+    indices = np.empty(max_faces * 6, dtype=np.uint32)
     
     vertex_count = 0
     index_count = 0
@@ -253,9 +250,12 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z):
             
             for u in range(dims[u_axis]):
                 for v in range(dims[v_axis]):
-                    coords = np.zeros(3, dtype=np.int32)
-                    coords[d_axis] = d; coords[u_axis] = u; coords[v_axis] = v
-                    x, y, z = coords[0], coords[1], coords[2]
+                    if d_axis == 0:
+                        x, y, z = d, v, u
+                    elif d_axis == 1:
+                        x, y, z = u, d, v
+                    else:
+                        x, y, z = u, v, d
                     
                     block_type = blocks[x, y, z]
                     
@@ -294,9 +294,12 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z):
                                 break
                             height += 1
                         
-                        quad_coords = np.zeros(3, dtype=np.int32)
-                        quad_coords[d_axis] = d; quad_coords[u_axis] = u; quad_coords[v_axis] = v
-                        q_x, q_y, q_z = quad_coords[0], quad_coords[1], quad_coords[2]
+                        if d_axis == 0:
+                            q_x, q_y, q_z = d, v, u
+                        elif d_axis == 1:
+                            q_x, q_y, q_z = u, d, v
+                        else:
+                            q_x, q_y, q_z = u, v, d
                         
                         face_data = get_greedy_quad(chunk_x, chunk_z, q_x, q_y, q_z, width, height, face_id, block_type, blocks)
                         
