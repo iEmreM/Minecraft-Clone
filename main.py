@@ -393,44 +393,75 @@ class MinecraftModernGL:
         sys.exit()
     
     def raycast(self):
-        """Cast a ray from camera to find the targeted block"""
-        # Ray origin (camera position)
+        """Cast a ray from camera to find the targeted block using 3D DDA algorithm"""
         origin = self.camera.position
-        
-        # Ray direction (camera front vector)
         direction = self.camera.front
-        
-        # Step along the ray to find block intersection
-        step_size = 0.1
         max_distance = self.block_reach
         
-        current_pos = glm.vec3(origin)
+        # Current voxel coordinates
+        x = int(math.floor(origin.x))
+        y = int(math.floor(origin.y))
+        z = int(math.floor(origin.z))
         
-        for i in range(int(max_distance / step_size)):
-            # Move along the ray
-            current_pos += direction * step_size
-            
-            # Convert to block coordinates
-            block_x = int(math.floor(current_pos.x))
-            block_y = int(math.floor(current_pos.y))
-            block_z = int(math.floor(current_pos.z))
-            
+        # Step direction for each axis (+1 or -1)
+        step_x = 1 if direction.x > 0 else (-1 if direction.x < 0 else 0)
+        step_y = 1 if direction.y > 0 else (-1 if direction.y < 0 else 0)
+        step_z = 1 if direction.z > 0 else (-1 if direction.z < 0 else 0)
+        
+        # Distance along ray to cross first voxel boundary
+        def get_t_max(p, d, step):
+            if d == 0: return float('inf')
+            boundary = math.floor(p) + (1.0 if step > 0 else 0.0)
+            if step < 0 and p == boundary:
+                boundary -= 1.0
+            return (boundary - p) / d
+
+        t_max_x = get_t_max(origin.x, direction.x, step_x)
+        t_max_y = get_t_max(origin.y, direction.y, step_y)
+        t_max_z = get_t_max(origin.z, direction.z, step_z)
+        
+        # How far to travel along ray to cross one voxel
+        t_delta_x = abs(1.0 / direction.x) if direction.x != 0 else float('inf')
+        t_delta_y = abs(1.0 / direction.y) if direction.y != 0 else float('inf')
+        t_delta_z = abs(1.0 / direction.z) if direction.z != 0 else float('inf')
+        
+        # Keep track of previous coordinates so we know which face was hit
+        prev_x, prev_y, prev_z = x, y, z
+        
+        while True:
             # Check if we hit a block
-            block_type = self.get_block_at(block_x, block_y, block_z)
+            block_type = self.get_block_at(x, y, z)
             if block_type != AIR:
-                # Calculate the previous position (for block placement)
-                prev_pos = current_pos - direction * step_size
-                prev_block_x = int(math.floor(prev_pos.x))
-                prev_block_y = int(math.floor(prev_pos.y))
-                prev_block_z = int(math.floor(prev_pos.z))
-                
                 return {
                     'hit': True,
-                    'block_pos': (block_x, block_y, block_z),
-                    'prev_pos': (prev_block_x, prev_block_y, prev_block_z),
+                    'block_pos': (x, y, z),
+                    'prev_pos': (prev_x, prev_y, prev_z),
                     'block_type': block_type
                 }
-        
+            
+            # Save previous position to know which adjacent air block to place blocks in
+            prev_x, prev_y, prev_z = x, y, z
+            
+            # Find the closest boundary and step into that voxel
+            if t_max_x < t_max_y:
+                if t_max_x < t_max_z:
+                    if t_max_x > max_distance: break
+                    x += step_x
+                    t_max_x += t_delta_x
+                else:
+                    if t_max_z > max_distance: break
+                    z += step_z
+                    t_max_z += t_delta_z
+            else:
+                if t_max_y < t_max_z:
+                    if t_max_y > max_distance: break
+                    y += step_y
+                    t_max_y += t_delta_y
+                else:
+                    if t_max_z > max_distance: break
+                    z += step_z
+                    t_max_z += t_delta_z
+                    
         return {'hit': False}
     
     def get_block_at(self, x, y, z):
