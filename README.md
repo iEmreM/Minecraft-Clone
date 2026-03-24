@@ -23,7 +23,7 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 | Move | `W` `A` `S` `D` |
 | Look | `Mouse` |
 | Jump (Walk) / Ascend (Fly) | `Space` |
-| Descend (Fly mode only) | `Shift` |
+| Run (Walk) / Descend (Fly) | `Shift` |
 | Toggle Fly Mode | `TAB` |
 | Toggle Mouse Capture | `ESC` |
 | Remove Block | `Left Click` |

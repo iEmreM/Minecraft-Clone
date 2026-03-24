@@ -21,12 +21,14 @@ class Camera:
         self.on_ground = False
         self.strafe = [0, 0]  # [forward/back, left/right]
         
-        # Physics constants
-        self.gravity = -30.0  # Stronger gravity like ornek1
-        self.jump_velocity = 9.0
-        self.walk_speed = 35.0
-        self.fly_speed = 58.0  # Faster flying
-        self.terminal_velocity = -50.0
+        # Physics constants (scaled perfectly for real Minecraft values)
+        self.sprinting = False
+        self.gravity = -32.0  # Real Minecraft gravity is 32 m/s^2
+        self.jump_velocity = 9.5
+        self.walk_speed = 4.3
+        self.sprint_speed = 7.0
+        self.fly_speed = 10.9
+        self.terminal_velocity = -78.4
         
         # Collision (like ornek1)
         self.world = None
@@ -178,16 +180,18 @@ class Camera:
             self.velocity.y = 0
         
         # Calculate horizontal movement
-        speed = self.fly_speed if self.flying else self.walk_speed
+        if self.flying:
+            speed = self.fly_speed * (2.0 if self.sprinting else 1.0)
+        else:
+            speed = self.sprint_speed if self.sprinting else self.walk_speed
+            
         movement = glm.vec3(0.0)
         
         if self.strafe[0] != 0:  # Forward/backward
-            if self.flying:
-                movement += self.front * self.strafe[0] * speed * delta_time
-            else:
-                # For walking, use horizontal component only
-                horizontal_front = glm.normalize(glm.vec3(self.front.x, 0.0, self.front.z))
-                movement += horizontal_front * self.strafe[0] * speed * delta_time
+            # Use yaw to construct a robust horizontal forward vector for both walking and flying
+            yaw_rad = glm.radians(self.yaw)
+            horizontal_front = glm.vec3(math.cos(yaw_rad), 0.0, math.sin(yaw_rad))
+            movement += horizontal_front * self.strafe[0] * speed * delta_time
         
         if self.strafe[1] != 0:  # Left/right
             movement += self.right * self.strafe[1] * speed * delta_time
@@ -225,8 +229,9 @@ class Camera:
                 self.position.y = final_y
                 self.on_ground = self.is_on_ground()
         
-        # Reset strafe
-        self.strafe = [0, 0]
+        # Do not reset strafe here! 
+        # main.py resets strafe once per frame, enabling all 8 
+        # physical sub-steps to process horizontal velocity properly.
     
     def process_keyboard(self, direction, velocity):
         """Simple movement for flying mode vertical movement"""

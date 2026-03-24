@@ -239,15 +239,18 @@ class MinecraftModernGL:
         # Reset strafe state
         self.camera.strafe = [0, 0]
         
+        # Sprint status
+        self.camera.sprinting = keys[pg.K_LSHIFT] or keys[pg.K_RSHIFT]
+        
         # Set strafe based on key presses (fixed direction)
         if keys[pg.K_w]:
-            self.camera.strafe[0] += 1.25  # Forward
+            self.camera.strafe[0] += 1.0  # Forward
         if keys[pg.K_s]:
-            self.camera.strafe[0] -= 1.25  # Backward
+            self.camera.strafe[0] -= 1.0  # Backward
         if keys[pg.K_a]:
-            self.camera.strafe[1] -= 1.25  # Left
+            self.camera.strafe[1] -= 1.0  # Left
         if keys[pg.K_d]:
-            self.camera.strafe[1] += 1.25  # Right
+            self.camera.strafe[1] += 1.0  # Right
         
         # Flying mode vertical movement
         if self.camera.flying:
@@ -309,8 +312,13 @@ class MinecraftModernGL:
         
         frustum_status = "FC:ON" if frustum_enabled else "FC:OFF"
         occlusion_status = "OC:ON" if occlusion_enabled else "OC:OFF"
-        flying_status = "FLY" if self.camera.flying else "WALK"
-        pg.display.set_caption(f'Minecraft ModernGL - FPS: {fps:.0f} | Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}) | {flying_status} | Block: {selected_name} | Chunks: {culling_info} | RD: {self.render_distance} | {frustum_status} | {occlusion_status}')
+        
+        if self.camera.flying:
+            move_status = "FLY(SPRINT)" if self.camera.sprinting else "FLY"
+        else:
+            move_status = "SPRINT" if self.camera.sprinting else "WALK"
+            
+        pg.display.set_caption(f'Minecraft ModernGL - FPS: {fps:.0f} | Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}) | {move_status} | Block: {selected_name} | Chunks: {culling_info} | RD: {self.render_distance} | {frustum_status} | {occlusion_status}')
     
     def render(self):
         """Render the game"""
