@@ -4,6 +4,8 @@
 <div align="center">
   <img src="./images/sc1.png" alt="Screenshot 1" width="48%">
   <img src="./images/sc2.png" alt="Screenshot 2" width="48%">
+  <img src="./images/sc4.png" alt="Screenshot 3" width="48%">
+  <img src="./images/sc3.png" alt="Screenshot 4" width="48%">
 </div>
 
 A comprehensive voxel-based engine built with Python, delivering a Minecraft-like experience. The project focuses on high performance and smooth gameplay by leveraging modern OpenGL features, multi-threading, and meshing algorithms.
