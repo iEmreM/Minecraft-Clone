@@ -4,7 +4,7 @@ import threading
 import queue
 import time
 from world.modern_chunk import ModernChunk, CHUNK_SIZE
-from world.fast_builder import build_chunk_mesh_fast
+from world.fast_builder import build_chunk_mesh_fast, NO_NEIGHBOR
 from engine.frustum import Frustum
 
 class ThreadedChunkManager:
@@ -62,29 +62,35 @@ class ThreadedChunkManager:
         
         # Generate chunks in a square around spawn
         radius = int(math.sqrt(self.chunks_to_pregenerate) // 2) + 1
-        generated_count = 0
-        
+        generated = []
+
         for x in range(spawn_chunk_x - radius, spawn_chunk_x + radius + 1):
             for z in range(spawn_chunk_z - radius, spawn_chunk_z + radius + 1):
-                if generated_count >= self.chunks_to_pregenerate:
+                if len(generated) >= self.chunks_to_pregenerate:
                     break
-                
+
                 # Generate chunk immediately (synchronously for pre-gen)
                 chunk = ModernChunk(x, z, self.renderer, chunk_data=None, chunk_manager=self)
-                
-                # Build mesh synchronously for pre-generated chunks so they're ready immediately
-                chunk.build_mesh()
-                
+
                 self.chunks[(x, z)] = chunk
                 self.loaded_chunks.add((x, z))
                 self.explored_chunks.add((x, z))
-                generated_count += 1
-                
-                print(f"Pre-generated chunk ({x}, {z}) - {generated_count}/{self.chunks_to_pregenerate}")
-            
-            if generated_count >= self.chunks_to_pregenerate:
+                generated.append((x, z))
+
+                print(f"Pre-generated chunk ({x}, {z}) - {len(generated)}/{self.chunks_to_pregenerate}")
+
+            if len(generated) >= self.chunks_to_pregenerate:
                 break
-        
+
+        # Mesh only after every chunk exists, so each one can see its neighbors
+        # and skip the seam faces they cover.
+        for chunk_x, chunk_z in generated:
+            chunk = self.chunks[(chunk_x, chunk_z)]
+            vertices, indices = build_chunk_mesh_fast(
+                chunk.blocks, chunk_x, chunk_z, self._neighbor_blocks(chunk_x, chunk_z))
+            chunk.upload_mesh(vertices, indices)
+
+        generated_count = len(generated)
         self.initial_chunks_generated = True
         print(f"Pre-generation complete! Generated {generated_count} chunks with meshes ready.")
     
@@ -154,9 +160,10 @@ class ThreadedChunkManager:
                     chunk_coords = mesh_request['coords']
                     chunk = mesh_request['chunk']
                     
-                    # Build mesh in background thread
+                    # Build mesh in background thread. The neighbor arrays were
+                    # picked up on the main thread when the request was queued.
                     vertices_array, indices_array = build_chunk_mesh_fast(
-                        chunk.blocks, chunk.chunk_x, chunk.chunk_z
+                        chunk.blocks, chunk.chunk_x, chunk.chunk_z, mesh_request['neighbors']
                     )
                     
                     # Queue completed mesh for main thread
@@ -193,7 +200,46 @@ class ThreadedChunkManager:
         distance = math.sqrt(dx*dx + dz*dz)
         
         return distance  # Lower distance = higher priority
-    
+
+    def _neighbor_blocks(self, chunk_x, chunk_z):
+        """The (-X, +X, -Z, +Z) neighbors' block arrays for the mesher.
+
+        NO_NEIGHBOR fills in for chunks that are not loaded, which makes the
+        mesher fall back to its old behaviour on that seam. Main thread only —
+        it reads self.chunks, which the worker never touches.
+        """
+        return tuple(
+            NO_NEIGHBOR if neighbor is None else neighbor.blocks
+            for neighbor in (
+                self.chunks.get((chunk_x - 1, chunk_z)),
+                self.chunks.get((chunk_x + 1, chunk_z)),
+                self.chunks.get((chunk_x, chunk_z - 1)),
+                self.chunks.get((chunk_x, chunk_z + 1)),
+            )
+        )
+
+    def request_mesh(self, chunk_x, chunk_z, chunk=None):
+        """Queue a background mesh build. No-op if the chunk is not loaded.
+
+        The neighbor arrays are gathered here rather than in the worker because
+        self.chunks is main-thread-only.
+        """
+        if chunk is None:
+            chunk = self.chunks.get((chunk_x, chunk_z))
+            if chunk is None:
+                return
+
+        self.mesh_request_counter += 1
+        self.mesh_build_queue.put((
+            self._calculate_chunk_priority(chunk_x, chunk_z),
+            self.mesh_request_counter,
+            {
+                'coords': (chunk_x, chunk_z),
+                'chunk': chunk,
+                'neighbors': self._neighbor_blocks(chunk_x, chunk_z),
+            },
+        ))
+
     def clear_distant_mesh_requests(self):
         """Clear mesh requests for chunks that are now too far from player"""
         current_chunk_x = int(self.player_position.x // CHUNK_SIZE)
@@ -290,35 +336,22 @@ class ThreadedChunkManager:
                 if result['type'] == 'loaded':
                     chunk_x, chunk_z = result['coords']
                     chunk = result['chunk']
-                    
-                    # Check if chunk has cached mesh - if so, create VAO immediately
-                    if chunk.mesh_cache_valid and chunk.cached_vertices is not None:
-                        # Create VAO from cached mesh on main thread
-                        vertices = chunk.cached_vertices
-                        indices = chunk.cached_indices
-                        
-                        if len(vertices) > 0:
-                            if chunk.vao:
-                                chunk.vao.release()
-                            chunk.vao = self.renderer.create_vao(vertices, indices)
-                            chunk.vertex_count = len(indices)
-                        
-                        chunk.needs_update = False
-                    elif chunk.needs_update:
-                        # No cached mesh - request mesh building in background with priority
-                        priority = self._calculate_chunk_priority(chunk_x, chunk_z)
-                        self.mesh_request_counter += 1
-                        self.mesh_build_queue.put((priority, self.mesh_request_counter, {
-                            'coords': (chunk_x, chunk_z),
-                            'chunk': chunk
-                        }))
-                    
+
                     # Add chunk to loaded chunks now that it's ready (or mesh is building)
                     with self.thread_lock:
                         self.chunks[(chunk_x, chunk_z)] = chunk
-                    
+
+                    self.request_mesh(chunk_x, chunk_z, chunk)
+
+                    # This chunk now closes off the seam its neighbors were
+                    # meshed against, so they have to drop those faces.
+                    self.request_mesh(chunk_x - 1, chunk_z)
+                    self.request_mesh(chunk_x + 1, chunk_z)
+                    self.request_mesh(chunk_x, chunk_z - 1)
+                    self.request_mesh(chunk_x, chunk_z + 1)
+
                     processed += 1
-                    
+
             except queue.Empty:
                 break
         
@@ -328,28 +361,18 @@ class ThreadedChunkManager:
             try:
                 mesh_data = self.completed_meshes.get_nowait()
                 chunk_coords = mesh_data['coords']
-                vertices = mesh_data['vertices']
-                indices = mesh_data['indices']
-                
-                # Get the chunk and create VAO on main thread
+
+                # Upload on the main thread (OpenGL requirement). A mesh whose
+                # chunk was unloaded meanwhile is simply dropped.
                 with self.thread_lock:
-                    if chunk_coords in self.chunks:
-                        chunk = self.chunks[chunk_coords]
-                        
-                        # Update chunk's cached mesh data
-                        chunk.cached_vertices = vertices
-                        chunk.cached_indices = indices
-                        chunk.mesh_cache_valid = True
-                        
-                        # Create VAO on main thread (OpenGL requirement)
-                        if len(vertices) > 0:
-                            if chunk.vao:
-                                chunk.vao.release()
-                            chunk.vao = self.renderer.create_vao(vertices, indices)
-                            chunk.vertex_count = len(indices)
-                        
-                        chunk.needs_update = False
-                        mesh_processed += 1
+                    chunk = self.chunks.get(chunk_coords)
+
+                if chunk is not None:
+                    chunk.upload_mesh(mesh_data['vertices'], mesh_data['indices'])
+
+                # Counted either way, so a burst of stale results cannot blow
+                # past the per-frame budget.
+                mesh_processed += 1
             except queue.Empty:
                 break
         
@@ -372,11 +395,10 @@ class ThreadedChunkManager:
             
             # Save chunk data to cache before unloading
             self.save_chunk_to_cache(chunk_x, chunk_z)
-            
+
             # Clean up GPU resources
-            if hasattr(chunk, 'vao') and chunk.vao:
-                chunk.vao.release()
-            
+            chunk.release_gl()
+
             # Remove from dictionaries
             with self.thread_lock:
                 del self.chunks[(chunk_x, chunk_z)]
@@ -525,9 +547,8 @@ class ThreadedChunkManager:
         # Clean up all chunks
         with self.thread_lock:
             for chunk in self.chunks.values():
-                if hasattr(chunk, 'vao') and chunk.vao:
-                    chunk.vao.release()
-            
+                chunk.release_gl()
+
             chunk_count = len(self.chunks)
             self.chunks.clear()
             self.loaded_chunks.clear()

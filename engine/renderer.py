@@ -116,23 +116,27 @@ class ModernGLRenderer:
         self.chunk_program['water_line'] = float(WATER_LINE)
     
     def create_vao(self, vertices, indices=None):
-        """Create a Vertex Array Object from vertex data"""
+        """Create a Vertex Array Object from vertex data.
+
+        Returns (vao, vbo, ibo). The caller owns all three and must release all
+        three — releasing the VAO alone leaves its buffers on the GPU.
+        """
         if vertices.size == 0:
-            return None
-            
+            return None, None, None
+
         # Create vertex buffer
         vbo = self.ctx.buffer(vertices.astype(np.float32).tobytes())
-        
-        # Create VAO
-        if indices is not None:
-            # Create index buffer
-            ibo = self.ctx.buffer(indices.astype(np.uint32).tobytes())
-            # Updated format: 3f position, 3f tex_coord (vec3), 1f shading
-            vao = self.ctx.vertex_array(self.chunk_program, [(vbo, '3f 3f 1f', 'in_position', 'in_tex_coord', 'in_shading')], ibo)
-        else:
-            vao = self.ctx.vertex_array(self.chunk_program, [(vbo, '3f 3f 1f', 'in_position', 'in_tex_coord', 'in_shading')])
-        
-        return vao
+
+        # Create index buffer
+        ibo = self.ctx.buffer(indices.astype(np.uint32).tobytes()) if indices is not None else None
+
+        # Updated format: 3f position, 3f tex_coord (vec3), 1f shading
+        vao = self.ctx.vertex_array(
+            self.chunk_program,
+            [(vbo, '3f 3f 1f', 'in_position', 'in_tex_coord', 'in_shading')],
+            ibo)
+
+        return vao, vbo, ibo
     
     def render_vao(self, vao):
         """Render a Vertex Array Object"""

@@ -8,17 +8,46 @@ CHUNK_HEIGHT = 256
 AIR = 0
 WATER = 8
 
-@njit(nogil=True, fastmath=True, cache=True)
-def is_block_solid(blocks, x, y, z):
-    """
-    Check if a block is solid (not air) for AO calculation
-    """
-    if x < 0 or x >= CHUNK_SIZE or y < 0 or y >= CHUNK_HEIGHT or z < 0 or z >= CHUNK_SIZE:
-        return False
-    return blocks[x, y, z] != AIR
+# Stand-in for a neighbor chunk that is not loaded. All AIR, so the seam facing
+# it is treated as exposed — the behaviour the mesher had before it knew about
+# neighbors at all. Shared and never written to.
+NO_NEIGHBOR = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=np.uint8)
 
 @njit(nogil=True, fastmath=True, cache=True)
-def get_optimized_ao(blocks, x, y, z, face_id):
+def get_block_ext(blocks, neighbors, x, y, z):
+    """Block at chunk-local (x, y, z), reaching into a neighbor when x or z is
+    outside this chunk.
+
+    *neighbors* is the 4-tuple (-X, +X, -Z, +Z) of neighbor block arrays, with
+    NO_NEIGHBOR standing in for chunks that are not loaded. Without this the
+    mesher saw every chunk in isolation: it treated the 4 seams as open air and
+    emitted a full wall of invisible faces on each one, and AO along the seam
+    was computed as if the neighbor were empty.
+
+    Diagonal neighbors are not passed in, so a sample off the chunk on both x
+    and z reads as AIR.
+    ponytail: that leaves AO slightly wrong on the 4 corner columns of a chunk
+    (1 column each, never noticed in play) — pass the diagonals in too if it
+    ever shows up.
+    """
+    if y < 0 or y >= CHUNK_HEIGHT:
+        return AIR
+    if x < 0:
+        if z < 0 or z >= CHUNK_SIZE:
+            return AIR
+        return neighbors[0][x + CHUNK_SIZE, y, z]
+    if x >= CHUNK_SIZE:
+        if z < 0 or z >= CHUNK_SIZE:
+            return AIR
+        return neighbors[1][x - CHUNK_SIZE, y, z]
+    if z < 0:
+        return neighbors[2][x, y, z + CHUNK_SIZE]
+    if z >= CHUNK_SIZE:
+        return neighbors[3][x, y, z - CHUNK_SIZE]
+    return blocks[x, y, z]
+
+@njit(nogil=True, fastmath=True, cache=True)
+def get_optimized_ao(blocks, neighbors, x, y, z, face_id):
     """
     Optimized AO calculation with reduced neighbor sampling (3 instead of 5)
     face_id: 0=top, 1=bottom, 2=front, 3=back, 4=right, 5=left
@@ -32,46 +61,46 @@ def get_optimized_ao(blocks, x, y, z, face_id):
     
     if face_id == 0: # top
         # Check: directly above, diagonal left, diagonal front
-        if is_block_solid(blocks, x, y+1, z):
+        if get_block_ext(blocks, neighbors, x, y+1, z) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x-1, y+1, z):
+        if get_block_ext(blocks, neighbors, x-1, y+1, z) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x, y+1, z-1):
+        if get_block_ext(blocks, neighbors, x, y+1, z-1) != AIR:
             solid_count += 1
     elif face_id == 1: # bottom
-        if is_block_solid(blocks, x, y-1, z):
+        if get_block_ext(blocks, neighbors, x, y-1, z) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x-1, y-1, z):
+        if get_block_ext(blocks, neighbors, x-1, y-1, z) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x, y-1, z-1):
+        if get_block_ext(blocks, neighbors, x, y-1, z-1) != AIR:
             solid_count += 1
     elif face_id == 2: # front (Z+)
-        if is_block_solid(blocks, x, y, z+1):
+        if get_block_ext(blocks, neighbors, x, y, z+1) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x-1, y, z+1):
+        if get_block_ext(blocks, neighbors, x-1, y, z+1) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x, y-1, z+1):
+        if get_block_ext(blocks, neighbors, x, y-1, z+1) != AIR:
             solid_count += 1
     elif face_id == 3: # back (Z-)
-        if is_block_solid(blocks, x, y, z-1):
+        if get_block_ext(blocks, neighbors, x, y, z-1) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x-1, y, z-1):
+        if get_block_ext(blocks, neighbors, x-1, y, z-1) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x, y-1, z-1):
+        if get_block_ext(blocks, neighbors, x, y-1, z-1) != AIR:
             solid_count += 1
     elif face_id == 4: # right (X+)
-        if is_block_solid(blocks, x+1, y, z):
+        if get_block_ext(blocks, neighbors, x+1, y, z) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x+1, y-1, z):
+        if get_block_ext(blocks, neighbors, x+1, y-1, z) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x+1, y, z-1):
+        if get_block_ext(blocks, neighbors, x+1, y, z-1) != AIR:
             solid_count += 1
     elif face_id == 5: # left (X-)
-        if is_block_solid(blocks, x-1, y, z):
+        if get_block_ext(blocks, neighbors, x-1, y, z) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x-1, y-1, z):
+        if get_block_ext(blocks, neighbors, x-1, y-1, z) != AIR:
             solid_count += 1
-        if is_block_solid(blocks, x-1, y, z-1):
+        if get_block_ext(blocks, neighbors, x-1, y, z-1) != AIR:
             solid_count += 1
     
     # Adjusted AO reduction for 3 samples (slightly stronger per-sample impact)
@@ -82,7 +111,7 @@ def get_optimized_ao(blocks, x, y, z, face_id):
     return val
 
 @njit(nogil=True, fastmath=True, cache=True)
-def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_type, blocks):
+def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_type, blocks, neighbors):
     """
     Generate vertices for a greedy quad with Texture Array support
     """
@@ -202,7 +231,7 @@ def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_typ
         u_vals = (u_min, u_max, u_max, u_min)
         v_vals = (v_max, v_max, v_min, v_min)
 
-    ao = get_optimized_ao(blocks, x, y, z, face_id)
+    ao = get_optimized_ao(blocks, neighbors, x, y, z, face_id)
     final_shading = shading * ao
     
     for i in range(4):
@@ -218,9 +247,12 @@ def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_typ
     return result
 
 @njit(nogil=True, fastmath=True, cache=True)
-def build_chunk_mesh_fast(blocks, chunk_x, chunk_z):
+def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors):
     """
     Fast chunk mesh builder using Greedy Meshing (Texture Array version)
+
+    *neighbors* is the (-X, +X, -Z, +Z) tuple of neighbor block arrays; see
+    get_block_ext. Pass NO_NEIGHBOR for any chunk that is not loaded.
     Returns (vertices, indices)
     """
     max_faces = 20000 
@@ -264,14 +296,11 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z):
                         if d_axis == 0: nx += direction
                         elif d_axis == 1: ny += direction
                         elif d_axis == 2: nz += direction
-                        
-                        exposed = False
-                        if nx < 0 or nx >= CHUNK_SIZE or ny < 0 or ny >= CHUNK_HEIGHT or nz < 0 or nz >= CHUNK_SIZE:
-                            exposed = True
-                        elif blocks[nx, ny, nz] == AIR or blocks[nx, ny, nz] == WATER:
-                            exposed = True
-                            
-                        if exposed:
+
+                        # Looks into the neighbor chunk on the seams, so a face
+                        # covered by the chunk next door is no longer emitted.
+                        neighbor_type = get_block_ext(blocks, neighbors, nx, ny, nz)
+                        if neighbor_type == AIR or neighbor_type == WATER:
                             mask[u, v] = block_type
             
             for v in range(dims[v_axis]):
@@ -301,7 +330,7 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z):
                         else:
                             q_x, q_y, q_z = u, v, d
                         
-                        face_data = get_greedy_quad(chunk_x, chunk_z, q_x, q_y, q_z, width, height, face_id, block_type, blocks)
+                        face_data = get_greedy_quad(chunk_x, chunk_z, q_x, q_y, q_z, width, height, face_id, block_type, blocks, neighbors)
                         
                         base_v_idx = vertex_count * 7 # Updated stride
                         for i in range(28): # 4 vertices * 7 floats
