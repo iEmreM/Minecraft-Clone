@@ -46,10 +46,12 @@ def get_block_ext(blocks, neighbors, x, y, z):
         return neighbors[3][x, y, z - CHUNK_SIZE]
     return blocks[x, y, z]
 
-# Corner shading, darkest to brightest. Same range the previous per-quad AO
-# produced (0.55 fully enclosed .. 0.8 open), so overall brightness is unchanged
-# — the shading just varies across a face now instead of stepping per quad.
-AO_LEVELS = (0.55, 0.55 + 0.25 / 3.0, 0.55 + 0.50 / 3.0, 0.80)
+# Corner shading, darkest to brightest. The open end stays at 0.8, so lit
+# surfaces look exactly as they did — only the occluded end goes deeper. The
+# steps widen as occlusion builds (0.09, 0.12, 0.14) instead of being evenly
+# spaced, which is roughly how the visible sky falls away and makes a corner
+# read as a contact shadow rather than a faint tint.
+AO_LEVELS = (0.45, 0.59, 0.71, 0.80)
 
 @njit(nogil=True, fastmath=True, cache=True)
 def get_face_ao(blocks, neighbors, x, y, z, face_id):
