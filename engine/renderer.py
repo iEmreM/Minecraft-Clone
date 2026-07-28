@@ -4,6 +4,7 @@ import numpy as np
 from engine.shader_manager import ShaderManager
 from engine.water_surface import WaterSurface
 from engine.sky import SkyRenderer
+from world.terrain_generator import WATER_LINE
 import glm
 import math
 
@@ -12,6 +13,9 @@ class ModernGLRenderer:
     FOV_DEGREES = 65.0
     NEAR_PLANE = 0.1
     FAR_PLANE = 1000.0
+
+    # Sky horizon; the chunk shader fades distant fog to this.
+    BG_COLOR = (0.6, 0.8, 0.95)
 
     def __init__(self, width=800, height=600):
         # Initialize Pygame
@@ -58,7 +62,9 @@ class ModernGLRenderer:
         # Initialize sky renderer
         self.sky_renderer = SkyRenderer(self.ctx, self.shader_manager)
         
+        self.bg_color = glm.vec3(*self.BG_COLOR)
         self.proj_matrix = self._make_projection(width, height)
+        self._upload_static_uniforms()
 
         # Initialize crosshair and block outline
         self._init_crosshair()
@@ -77,18 +83,31 @@ class ModernGLRenderer:
         return glm.perspective(glm.radians(self.FOV_DEGREES), width / height,
                                self.NEAR_PLANE, self.FAR_PLANE)
 
+    def _upload_static_uniforms(self):
+        """Write the chunk uniforms that only change on a resize.
+
+        The fog colour, the water line and the projection are all fixed between
+        resizes; they used to be re-uploaded on every frame, and the water line
+        came with a module import each time on top of that.
+        """
+        if not self.chunk_program:
+            return
+
+        self.chunk_program['m_proj'].write(self.proj_matrix.to_bytes())
+        self.chunk_program['bg_color'].write(self.bg_color)
+        self.chunk_program['water_line'] = float(WATER_LINE)
+
     def resize(self, width, height):
         """Handle window resize"""
         self.width = width
         self.height = height
         self.ctx.viewport = (0, 0, width, height)
         self.proj_matrix = self._make_projection(width, height)
+        self._upload_static_uniforms()
 
     def clear(self):
         """Clear the screen with sky background color like ornek2"""
-        # Set sky color to match procedural sky horizon
-        self.bg_color = glm.vec3(0.6, 0.8, 0.95)
-        self.ctx.clear(color=(self.bg_color.x, self.bg_color.y, self.bg_color.z))
+        self.ctx.clear(color=self.BG_COLOR)
     
     def set_view_matrix(self, view_matrix):
         """Set the view matrix for rendering"""
@@ -96,26 +115,16 @@ class ModernGLRenderer:
             self.chunk_program['m_view'].write(view_matrix.to_bytes())
     
     def update_matrices(self, view_matrix, model_matrix=None):
-        """Update projection, view, and model matrices"""
+        """Upload the one chunk uniform that changes every frame.
+
+        Everything else lives in _upload_static_uniforms.
+        """
         if not self.chunk_program:
             return
-            
-        # Set projection matrix
-        self.chunk_program['m_proj'].write(self.proj_matrix.to_bytes())
-        
-        # Set view matrix
-        self.chunk_program['m_view'].write(view_matrix.to_bytes())
-        
+
         # OPTIMIZATION: m_model removed - shader compiler optimizes it out since unused
         # The vertex shader doesn't use m_model (always identity), so GLSL compiler removes it
-        
-        # Set background color for fog effect
-        if hasattr(self, 'bg_color'):
-            self.chunk_program['bg_color'].write(self.bg_color)
-        
-        # Set water line for underwater effects (from ornek2)
-        from world.terrain_generator import WATER_LINE
-        self.chunk_program['water_line'] = float(WATER_LINE)
+        self.chunk_program['m_view'].write(view_matrix.to_bytes())
     
     def create_vao(self, vertices, indices=None):
         """Create a Vertex Array Object from vertex data.
@@ -126,11 +135,12 @@ class ModernGLRenderer:
         if vertices.size == 0:
             return None, None, None
 
-        # Create vertex buffer
-        vbo = self.ctx.buffer(vertices.astype(np.float32).tobytes())
+        # copy=False so the already-correct dtype coming out of the mesher is
+        # uploaded as is; astype used to copy ~130 KB per chunk for nothing.
+        vbo = self.ctx.buffer(vertices.astype(np.float32, copy=False).tobytes())
 
-        # Create index buffer
-        ibo = self.ctx.buffer(indices.astype(np.uint32).tobytes()) if indices is not None else None
+        ibo = (self.ctx.buffer(indices.astype(np.uint32, copy=False).tobytes())
+               if indices is not None else None)
 
         # Updated format: 3f position, 3f tex_coord (vec3), 1f shading
         vao = self.ctx.vertex_array(

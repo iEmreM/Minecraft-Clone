@@ -16,6 +16,8 @@ class ThreadedChunkManager:
         self.chunks = {}  # Dictionary of (x, z) -> chunk (main thread access)
         self.loaded_chunks = set()  # Set of (x, z) coordinates for loaded chunks
         self.last_player_chunk = None
+        self._offsets = []          # circular render-distance shape, see _range_offsets
+        self._offsets_radius = None
         
         # Chunk persistence system
         self.chunk_cache = {}  # Cache for unloaded but persistent chunks
@@ -295,20 +297,30 @@ class ThreadedChunkManager:
         """Get the chunk coordinates the player is currently in"""
         return self.world_to_chunk_coords(player_pos.x, player_pos.z)
     
+    def _range_offsets(self):
+        """Chunk offsets inside the circular render distance, cached per radius.
+
+        The shape only depends on render_distance, so it is built once instead
+        of on every chunk crossing — and compared squared, which drops the
+        (2r+1)^2 square roots the old version did each time.
+        """
+        if self._offsets_radius != self.render_distance:
+            radius = self.render_distance
+            radius_sq = radius * radius
+            self._offsets = [
+                (dx, dz)
+                for dx in range(-radius, radius + 1)
+                for dz in range(-radius, radius + 1)
+                if dx * dx + dz * dz <= radius_sq
+            ]
+            self._offsets_radius = radius
+
+        return self._offsets
+
     def get_chunks_in_range(self, center_chunk_x, center_chunk_z):
         """Get all chunk coordinates within render distance of center chunk"""
-        chunks_in_range = set()
-        
-        for x in range(center_chunk_x - self.render_distance, 
-                      center_chunk_x + self.render_distance + 1):
-            for z in range(center_chunk_z - self.render_distance, 
-                          center_chunk_z + self.render_distance + 1):
-                # Use circular render distance
-                distance = math.sqrt((x - center_chunk_x)**2 + (z - center_chunk_z)**2)
-                if distance <= self.render_distance:
-                    chunks_in_range.add((x, z))
-        
-        return chunks_in_range
+        return {(center_chunk_x + dx, center_chunk_z + dz)
+                for dx, dz in self._range_offsets()}
     
     def request_chunk_load(self, chunk_x, chunk_z):
         """Request a chunk to be loaded in the background"""
