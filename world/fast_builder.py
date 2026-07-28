@@ -46,84 +46,118 @@ def get_block_ext(blocks, neighbors, x, y, z):
         return neighbors[3][x, y, z - CHUNK_SIZE]
     return blocks[x, y, z]
 
-@njit(nogil=True, fastmath=True, cache=True)
-def get_optimized_ao(blocks, neighbors, x, y, z, face_id):
-    """
-    Optimized AO calculation with reduced neighbor sampling (3 instead of 5)
-    face_id: 0=top, 1=bottom, 2=front, 3=back, 4=right, 5=left
-    Performance: ~40% faster than previous version
-    """
-    base_ao = 0.8
-    
-    # Sample only 3 critical neighbors instead of 5 for better performance
-    # Format: (dx, dy, dz) relative to block position
-    solid_count = 0
-    
-    if face_id == 0: # top
-        # Check: directly above, diagonal left, diagonal front
-        if get_block_ext(blocks, neighbors, x, y+1, z) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x-1, y+1, z) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x, y+1, z-1) != AIR:
-            solid_count += 1
-    elif face_id == 1: # bottom
-        if get_block_ext(blocks, neighbors, x, y-1, z) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x-1, y-1, z) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x, y-1, z-1) != AIR:
-            solid_count += 1
-    elif face_id == 2: # front (Z+)
-        if get_block_ext(blocks, neighbors, x, y, z+1) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x-1, y, z+1) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x, y-1, z+1) != AIR:
-            solid_count += 1
-    elif face_id == 3: # back (Z-)
-        if get_block_ext(blocks, neighbors, x, y, z-1) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x-1, y, z-1) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x, y-1, z-1) != AIR:
-            solid_count += 1
-    elif face_id == 4: # right (X+)
-        if get_block_ext(blocks, neighbors, x+1, y, z) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x+1, y-1, z) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x+1, y, z-1) != AIR:
-            solid_count += 1
-    elif face_id == 5: # left (X-)
-        if get_block_ext(blocks, neighbors, x-1, y, z) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x-1, y-1, z) != AIR:
-            solid_count += 1
-        if get_block_ext(blocks, neighbors, x-1, y, z-1) != AIR:
-            solid_count += 1
-    
-    # Adjusted AO reduction for 3 samples (slightly stronger per-sample impact)
-    ao_reduction = (solid_count / 3.0) * 0.25
-    val = base_ao - ao_reduction
-    if val < 0.4:
-        return 0.4
-    return val
+# Corner shading, darkest to brightest. Same range the previous per-quad AO
+# produced (0.55 fully enclosed .. 0.8 open), so overall brightness is unchanged
+# — the shading just varies across a face now instead of stepping per quad.
+AO_LEVELS = (0.55, 0.55 + 0.25 / 3.0, 0.55 + 0.50 / 3.0, 0.80)
 
 @njit(nogil=True, fastmath=True, cache=True)
-def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_type, blocks, neighbors):
+def get_face_ao(blocks, neighbors, x, y, z, face_id):
+    """Per-corner ambient occlusion for one block face, packed into an int.
+
+    Returns the four corner levels (0 = wedged into a corner, 3 = open sky) at
+    2 bits each, in the vertex order emit_greedy_quad writes them.
+
+    Packing them into a single int is what lets the greedy pass compare two
+    faces' shading with one ==, so blocks whose corners are lit differently are
+    no longer merged into one flat quad. AO used to be sampled once per merged
+    quad, which made a 16-block run take the shading of its first block.
     """
-    Generate vertices for a greedy quad with Texture Array support
+    # Face normal, then the two in-plane axes, in the order the quad's width and
+    # height expand along.
+    if face_id == 0:      # top (Y+):     width -> X, height -> Z
+        nx, ny, nz = 0, 1, 0
+        ux, uy, uz = 1, 0, 0
+        vx, vy, vz = 0, 0, 1
+    elif face_id == 1:    # bottom (Y-):  width -> X, height -> Z
+        nx, ny, nz = 0, -1, 0
+        ux, uy, uz = 1, 0, 0
+        vx, vy, vz = 0, 0, 1
+    elif face_id == 2:    # front (Z+):   width -> X, height -> Y
+        nx, ny, nz = 0, 0, 1
+        ux, uy, uz = 1, 0, 0
+        vx, vy, vz = 0, 1, 0
+    elif face_id == 3:    # back (Z-):    width -> X, height -> Y
+        nx, ny, nz = 0, 0, -1
+        ux, uy, uz = 1, 0, 0
+        vx, vy, vz = 0, 1, 0
+    elif face_id == 4:    # right (X+):   width -> Z, height -> Y
+        nx, ny, nz = 1, 0, 0
+        ux, uy, uz = 0, 0, 1
+        vx, vy, vz = 0, 1, 0
+    else:                 # left (X-):    width -> Z, height -> Y
+        nx, ny, nz = -1, 0, 0
+        ux, uy, uz = 0, 0, 1
+        vx, vy, vz = 0, 1, 0
+
+    # Which (u, v) corner each of the four vertices sits on, matching the vertex
+    # order in emit_greedy_quad.
+    if face_id == 0:
+        su = (-1, -1, 1, 1)
+        sv = (-1, 1, 1, -1)
+    elif face_id == 3 or face_id == 4:
+        su = (1, -1, -1, 1)
+        sv = (-1, -1, 1, 1)
+    else:                 # 1, 2, 5
+        su = (-1, 1, 1, -1)
+        sv = (-1, -1, 1, 1)
+
+    # Everything is sampled in the layer of air the face looks into. The four
+    # corners share their side samples, so the ring around the face is read once
+    # (8 lookups) instead of 3 per corner.
+    bx = x + nx
+    by = y + ny
+    bz = z + nz
+
+    s_um = get_block_ext(blocks, neighbors, bx - ux, by - uy, bz - uz) != AIR
+    s_up = get_block_ext(blocks, neighbors, bx + ux, by + uy, bz + uz) != AIR
+    s_vm = get_block_ext(blocks, neighbors, bx - vx, by - vy, bz - vz) != AIR
+    s_vp = get_block_ext(blocks, neighbors, bx + vx, by + vy, bz + vz) != AIR
+
+    c_mm = get_block_ext(blocks, neighbors, bx - ux - vx, by - uy - vy, bz - uz - vz) != AIR
+    c_pm = get_block_ext(blocks, neighbors, bx + ux - vx, by + uy - vy, bz + uz - vz) != AIR
+    c_mp = get_block_ext(blocks, neighbors, bx - ux + vx, by - uy + vy, bz - uz + vz) != AIR
+    c_pp = get_block_ext(blocks, neighbors, bx + ux + vx, by + uy + vy, bz + uz + vz) != AIR
+
+    code = 0
+    for i in range(4):
+        au = su[i]
+        av = sv[i]
+
+        side_u = s_um if au < 0 else s_up
+        side_v = s_vm if av < 0 else s_vp
+
+        if side_u and side_v:
+            level = 0     # both sides closed: the diagonal cannot let light in
+        else:
+            if au < 0:
+                diag = c_mm if av < 0 else c_mp
+            else:
+                diag = c_pm if av < 0 else c_pp
+            level = 3 - int(side_u) - int(side_v) - int(diag)
+
+        code |= level << (2 * i)
+
+    return code
+
+@njit(nogil=True, fastmath=True, cache=True)
+def emit_greedy_quad(vertices, offset, chunk_x, chunk_z, x, y, z, width, height, face_id, block_type, ao_code):
+    """
+    Write one greedy quad's 4 vertices into *vertices* starting at *offset*.
+
+    *ao_code* is the packed per-corner AO from get_face_ao; every block merged
+    into this quad shares it.
+
+    Writes in place and uses tuples for the corner coordinates: this used to
+    allocate five small numpy arrays per quad, which cost about a third of the
+    whole mesh build once per-corner AO pushed the quad count up.
     """
     world_x = chunk_x * CHUNK_SIZE
     world_z = chunk_z * CHUNK_SIZE
-    
+
     # Base coords
-    bx, by, bz = world_x + x, y, world_z + z
-    
-    # Quad structure: 4 vertices * 7 attributes (x,y,z, u,v,layer, shading)
-    result = np.empty(28, dtype=np.float32)
-    
+    bx, by, bz = float(world_x + x), float(y), float(world_z + z)
+
     x_min, y_min, z_min = bx, by, bz
     x_max, y_max, z_max = bx, by, bz
     
@@ -131,51 +165,51 @@ def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_typ
         x_max += width
         z_max += height
         y_min += 1.0; y_max += 1.0
-        vx = np.array([x_min, x_min, x_max, x_max], dtype=np.float32)
-        vy = np.array([y_min, y_min, y_min, y_min], dtype=np.float32)
-        vz = np.array([z_min, z_max, z_max, z_min], dtype=np.float32)
+        vx = (x_min, x_min, x_max, x_max)
+        vy = (y_min, y_min, y_min, y_min)
+        vz = (z_min, z_max, z_max, z_min)
         shading = 1.0
         
     elif face_id == 1: # Bottom (Y-)
         x_max += width
         z_max += height
-        vx = np.array([x_min, x_max, x_max, x_min], dtype=np.float32)
-        vy = np.array([y_min, y_min, y_min, y_min], dtype=np.float32)
-        vz = np.array([z_min, z_min, z_max, z_max], dtype=np.float32)
+        vx = (x_min, x_max, x_max, x_min)
+        vy = (y_min, y_min, y_min, y_min)
+        vz = (z_min, z_min, z_max, z_max)
         shading = 0.4
         
     elif face_id == 2: # Front (Z+)
         x_max += width
         y_max += height
         z_min += 1.0; z_max += 1.0
-        vx = np.array([x_min, x_max, x_max, x_min], dtype=np.float32)
-        vy = np.array([y_min, y_min, y_max, y_max], dtype=np.float32)
-        vz = np.array([z_min, z_min, z_min, z_min], dtype=np.float32)
+        vx = (x_min, x_max, x_max, x_min)
+        vy = (y_min, y_min, y_max, y_max)
+        vz = (z_min, z_min, z_min, z_min)
         shading = 0.8
         
     elif face_id == 3: # Back (Z-)
         x_max += width
         y_max += height
-        vx = np.array([x_max, x_min, x_min, x_max], dtype=np.float32)
-        vy = np.array([y_min, y_min, y_max, y_max], dtype=np.float32)
-        vz = np.array([z_min, z_min, z_min, z_min], dtype=np.float32)
+        vx = (x_max, x_min, x_min, x_max)
+        vy = (y_min, y_min, y_max, y_max)
+        vz = (z_min, z_min, z_min, z_min)
         shading = 0.8
         
     elif face_id == 4: # Right (X+)
         z_max += width
         y_max += height
         x_min += 1.0; x_max += 1.0
-        vx = np.array([x_min, x_min, x_min, x_min], dtype=np.float32)
-        vy = np.array([y_min, y_min, y_max, y_max], dtype=np.float32)
-        vz = np.array([z_max, z_min, z_min, z_max], dtype=np.float32)
+        vx = (x_min, x_min, x_min, x_min)
+        vy = (y_min, y_min, y_max, y_max)
+        vz = (z_max, z_min, z_min, z_max)
         shading = 0.6
         
     elif face_id == 5: # Left (X-)
         z_max += width
         y_max += height
-        vx = np.array([x_min, x_min, x_min, x_min], dtype=np.float32)
-        vy = np.array([y_min, y_min, y_max, y_max], dtype=np.float32)
-        vz = np.array([z_min, z_max, z_max, z_min], dtype=np.float32)
+        vx = (x_min, x_min, x_min, x_min)
+        vy = (y_min, y_min, y_max, y_max)
+        vz = (z_min, z_max, z_max, z_min)
         shading = 0.6
 
     # Texture Layer Logic
@@ -231,20 +265,16 @@ def get_greedy_quad(chunk_x, chunk_z, x, y, z, width, height, face_id, block_typ
         u_vals = (u_min, u_max, u_max, u_min)
         v_vals = (v_max, v_max, v_min, v_min)
 
-    ao = get_optimized_ao(blocks, neighbors, x, y, z, face_id)
-    final_shading = shading * ao
-    
     for i in range(4):
-        base = i * 7 # 7 floats per vertex now
-        result[base] = vx[i]
-        result[base+1] = vy[i]
-        result[base+2] = vz[i]
-        result[base+3] = u_vals[i]
-        result[base+4] = v_vals[i]
-        result[base+5] = layer # Texture Layer
-        result[base+6] = final_shading
-        
-    return result
+        base = offset + i * 7 # 7 floats per vertex now
+        vertices[base] = vx[i]
+        vertices[base+1] = vy[i]
+        vertices[base+2] = vz[i]
+        vertices[base+3] = u_vals[i]
+        vertices[base+4] = v_vals[i]
+        vertices[base+5] = layer # Texture Layer
+        # Face brightness times this corner's own occlusion.
+        vertices[base+6] = shading * AO_LEVELS[(ao_code >> (2 * i)) & 3]
 
 @njit(nogil=True, fastmath=True, cache=True)
 def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors):
@@ -263,7 +293,22 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors):
     vertex_count = 0
     index_count = 0
     
-    dims = np.array([CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE])
+    # Only scan up to the highest block plus one layer of air for its top face.
+    # Chunks are 256 tall but terrain tops out around 30-80, so the untrimmed
+    # sweep spent most of its time on empty sky.
+    max_y = 0
+    for lx in range(CHUNK_SIZE):
+        for lz in range(CHUNK_SIZE):
+            for ly in range(CHUNK_HEIGHT - 1, max_y, -1):
+                if blocks[lx, ly, lz] != AIR:
+                    max_y = ly
+                    break
+
+    scan_height = max_y + 2
+    if scan_height > CHUNK_HEIGHT:
+        scan_height = CHUNK_HEIGHT
+
+    dims = np.array([CHUNK_SIZE, scan_height, CHUNK_SIZE])
     
     for face_id in range(6):
         if face_id == 0 or face_id == 1:
@@ -275,10 +320,14 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors):
             
         direction = 1 if (face_id % 2 == 0) else -1
         
-        mask = np.zeros((dims[u_axis], dims[v_axis]), dtype=np.int32) 
-        
+        mask = np.zeros((dims[u_axis], dims[v_axis]), dtype=np.int32)
+        # Packed per-corner AO, kept beside the block type so a run only merges
+        # while both match.
+        mask_ao = np.zeros((dims[u_axis], dims[v_axis]), dtype=np.int32)
+
         for d in range(dims[d_axis]):
             mask.fill(0)
+            mask_ao.fill(0)
             
             for u in range(dims[u_axis]):
                 for v in range(dims[v_axis]):
@@ -302,21 +351,25 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors):
                         neighbor_type = get_block_ext(blocks, neighbors, nx, ny, nz)
                         if neighbor_type == AIR or neighbor_type == WATER:
                             mask[u, v] = block_type
+                            mask_ao[u, v] = get_face_ao(blocks, neighbors, x, y, z, face_id)
             
             for v in range(dims[v_axis]):
                 u = 0
                 while u < dims[u_axis]:
                     if mask[u, v] != 0:
                         block_type = mask[u, v]
+                        ao_code = mask_ao[u, v]
                         width = 1
-                        while u + width < dims[u_axis] and mask[u + width, v] == block_type:
+                        while (u + width < dims[u_axis] and mask[u + width, v] == block_type
+                               and mask_ao[u + width, v] == ao_code):
                             width += 1
-                        
+
                         height = 1
                         done = False
                         while v + height < dims[v_axis]:
                             for w in range(width):
-                                if mask[u + w, v + height] != block_type:
+                                if (mask[u + w, v + height] != block_type
+                                        or mask_ao[u + w, v + height] != ao_code):
                                     done = True
                                     break
                             if done:
@@ -330,19 +383,33 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors):
                         else:
                             q_x, q_y, q_z = u, v, d
                         
-                        face_data = get_greedy_quad(chunk_x, chunk_z, q_x, q_y, q_z, width, height, face_id, block_type, blocks, neighbors)
-                        
-                        base_v_idx = vertex_count * 7 # Updated stride
-                        for i in range(28): # 4 vertices * 7 floats
-                            vertices[base_v_idx + i] = face_data[i]
-                        
-                        start_v = int(vertex_count / 1)
-                        indices[index_count] = start_v
-                        indices[index_count+1] = start_v + 1
-                        indices[index_count+2] = start_v + 2
-                        indices[index_count+3] = start_v
-                        indices[index_count+4] = start_v + 2
-                        indices[index_count+5] = start_v + 3
+                        emit_greedy_quad(vertices, vertex_count * 7, chunk_x, chunk_z,
+                                         q_x, q_y, q_z, width, height, face_id,
+                                         block_type, ao_code)
+
+                        # Split the quad along its brighter diagonal. Cutting
+                        # across the dark one smears a single dark corner over
+                        # half the face.
+                        ao_0 = ao_code & 3
+                        ao_1 = (ao_code >> 2) & 3
+                        ao_2 = (ao_code >> 4) & 3
+                        ao_3 = (ao_code >> 6) & 3
+
+                        start_v = vertex_count
+                        if ao_0 + ao_2 >= ao_1 + ao_3:
+                            indices[index_count] = start_v
+                            indices[index_count+1] = start_v + 1
+                            indices[index_count+2] = start_v + 2
+                            indices[index_count+3] = start_v
+                            indices[index_count+4] = start_v + 2
+                            indices[index_count+5] = start_v + 3
+                        else:
+                            indices[index_count] = start_v + 1
+                            indices[index_count+1] = start_v + 2
+                            indices[index_count+2] = start_v + 3
+                            indices[index_count+3] = start_v + 1
+                            indices[index_count+4] = start_v + 3
+                            indices[index_count+5] = start_v
                         
                         vertex_count += 4
                         index_count += 6

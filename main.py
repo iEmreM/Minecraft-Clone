@@ -473,13 +473,10 @@ class MinecraftModernGL:
         if raycast_result['hit']:
             x, y, z = raycast_result['prev_pos']
             
-            # Don't place block if it would intersect with the player
-            player_pos = self.camera.position
-            if (abs(player_pos.x - x) < 1.5 and 
-                abs(player_pos.y - y) < 2.0 and 
-                abs(player_pos.z - z) < 1.5):
+            # Don't place a block the player is standing in
+            if self.camera.intersects_block(x, y, z):
                 return
-            
+
             # Only place if the position is currently air
             if self.get_block_at(x, y, z) == AIR:
                 self.set_block_at(x, y, z, self.selected_block_type)

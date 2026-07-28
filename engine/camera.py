@@ -112,6 +112,18 @@ class Camera:
             'z2': pos.z + half_width - skin
         }
 
+    def intersects_block(self, block_x, block_y, block_z):
+        """True if the player's box overlaps the unit cube at these block coords.
+
+        Used to refuse placing a block inside the player. The check it replaced
+        was a 1.5 x 2.0 x 1.5 box around the eye, which also refused free cells
+        beside and below the player.
+        """
+        box = self.get_bounding_box(self.position)
+        return (box['x1'] < block_x + 1 and box['x2'] > block_x and
+                box['y1'] < block_y + 1 and box['y2'] > block_y and
+                box['z1'] < block_z + 1 and box['z2'] > block_z)
+
     def _box_hits_block(self, bbox):
         """True if any non-air block overlaps *bbox*."""
         for block_x in range(int(math.floor(bbox['x1'])), int(math.floor(bbox['x2'])) + 1):

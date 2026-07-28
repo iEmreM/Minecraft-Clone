@@ -9,6 +9,10 @@ import math
 
 
 class ModernGLRenderer:
+    FOV_DEGREES = 65.0
+    NEAR_PLANE = 0.1
+    FAR_PLANE = 1000.0
+
     def __init__(self, width=800, height=600):
         # Initialize Pygame
         pg.init()
@@ -54,34 +58,32 @@ class ModernGLRenderer:
         # Initialize sky renderer
         self.sky_renderer = SkyRenderer(self.ctx, self.shader_manager)
         
-        # Create projection matrix with proper far distance like ornek2
-        self.proj_matrix = glm.perspective(
-            glm.radians(65.0), 
-            width / height, 
-            0.1, 
-            1000.0  # Use far distance like ornek2 for proper render distance
-        )
-        
+        self.proj_matrix = self._make_projection(width, height)
+
         # Initialize crosshair and block outline
         self._init_crosshair()
         self._init_block_outline()
         
         print("ModernGL Renderer initialized successfully")
     
+    def _make_projection(self, width, height):
+        """Perspective matrix for the current viewport.
+
+        One place, so startup and resize cannot disagree: the far plane used to
+        be 1000 in __init__ and 5000 in resize, so the first window resize
+        silently changed the render range and cost depth precision. Fog is fully
+        opaque well before 1000 anyway.
+        """
+        return glm.perspective(glm.radians(self.FOV_DEGREES), width / height,
+                               self.NEAR_PLANE, self.FAR_PLANE)
+
     def resize(self, width, height):
         """Handle window resize"""
         self.width = width
         self.height = height
         self.ctx.viewport = (0, 0, width, height)
-        
-        # Update projection matrix with increased render distance
-        self.proj_matrix = glm.perspective(
-            glm.radians(65.0),
-            width / height,
-            0.1,
-            5000.0  # Increased from 100 to 500 for better fog visibility
-        )
-    
+        self.proj_matrix = self._make_projection(width, height)
+
     def clear(self):
         """Clear the screen with sky background color like ornek2"""
         # Set sky color to match procedural sky horizon
