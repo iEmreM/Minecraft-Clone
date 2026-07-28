@@ -3,7 +3,8 @@ import glm
 import threading
 import queue
 import time
-from world.modern_chunk import ModernChunk
+from world.modern_chunk import ModernChunk, CHUNK_SIZE
+from world.fast_builder import build_chunk_mesh_fast
 from engine.frustum import Frustum
 
 class ThreadedChunkManager:
@@ -56,7 +57,6 @@ class ThreadedChunkManager:
         print(f"Pre-generating {self.chunks_to_pregenerate} chunks around spawn ({spawn_x}, {spawn_z})...")
         
         # Calculate spawn chunk coordinates
-        from world.modern_chunk import CHUNK_SIZE
         spawn_chunk_x = int(spawn_x // CHUNK_SIZE)
         spawn_chunk_z = int(spawn_z // CHUNK_SIZE)
         
@@ -155,7 +155,6 @@ class ThreadedChunkManager:
                     chunk = mesh_request['chunk']
                     
                     # Build mesh in background thread
-                    from world.fast_builder import build_chunk_mesh_fast
                     vertices_array, indices_array = build_chunk_mesh_fast(
                         chunk.blocks, chunk.chunk_x, chunk.chunk_z
                     )
@@ -184,7 +183,6 @@ class ThreadedChunkManager:
     
     def _calculate_chunk_priority(self, chunk_x, chunk_z):
         """Calculate priority for chunk based on distance to player (lower = higher priority)"""
-        from world.modern_chunk import CHUNK_SIZE
         # Calculate chunk center world position
         chunk_center_x = (chunk_x * CHUNK_SIZE) + (CHUNK_SIZE / 2)
         chunk_center_z = (chunk_z * CHUNK_SIZE) + (CHUNK_SIZE / 2)
@@ -198,7 +196,6 @@ class ThreadedChunkManager:
     
     def clear_distant_mesh_requests(self):
         """Clear mesh requests for chunks that are now too far from player"""
-        from world.modern_chunk import CHUNK_SIZE
         current_chunk_x = int(self.player_position.x // CHUNK_SIZE)
         current_chunk_z = int(self.player_position.z // CHUNK_SIZE)
         
@@ -237,7 +234,6 @@ class ThreadedChunkManager:
     
     def world_to_chunk_coords(self, world_x, world_z):
         """Convert world coordinates to chunk coordinates"""
-        from world.modern_chunk import CHUNK_SIZE
         chunk_x = int(world_x // CHUNK_SIZE)
         chunk_z = int(world_z // CHUNK_SIZE)
         return chunk_x, chunk_z
@@ -438,37 +434,46 @@ class ThreadedChunkManager:
         return loaded > 0 or unloaded > 0  # Return True if any changes occurred
     
     def get_chunk(self, chunk_x, chunk_z):
-        """Get a chunk at the given coordinates, or None if not loaded"""
-        with self.thread_lock:
-            return self.chunks.get((chunk_x, chunk_z))
+        """Get a chunk at the given coordinates, or None if not loaded.
+
+        No lock: self.chunks is only ever touched by the main thread. The worker
+        hands finished chunks over through queues and never reaches into the
+        dict, so taking the lock here bought nothing while costing an
+        acquire/release on every one of the ~200 block queries the collision
+        code and the raycast make each frame.
+        """
+        return self.chunks.get((chunk_x, chunk_z))
     
     def get_block_at(self, world_x, world_y, world_z):
-        """Get block type at world coordinates"""
-        chunk_x, chunk_z = self.world_to_chunk_coords(world_x, world_z)
-        chunk = self.get_chunk(chunk_x, chunk_z)
-        
-        if chunk:
-            from world.modern_chunk import CHUNK_SIZE
-            # Convert world coordinates to local chunk coordinates
-            local_x = int(world_x - chunk_x * CHUNK_SIZE)
-            local_z = int(world_z - chunk_z * CHUNK_SIZE)
-            return chunk.get_block(local_x, int(world_y), local_z)
-        
-        return 0  # AIR if chunk not loaded
-    
+        """Get block type at world coordinates.
+
+        Hot path — the collision box sweep and the raycast call this a few
+        hundred times per frame, so the helper calls are inlined here.
+        """
+        chunk_x = int(world_x // CHUNK_SIZE)
+        chunk_z = int(world_z // CHUNK_SIZE)
+        chunk = self.chunks.get((chunk_x, chunk_z))
+
+        if chunk is None:
+            return 0  # AIR if chunk not loaded
+
+        # Convert world coordinates to local chunk coordinates
+        local_x = int(world_x - chunk_x * CHUNK_SIZE)
+        local_z = int(world_z - chunk_z * CHUNK_SIZE)
+        return chunk.get_block(local_x, int(world_y), local_z)
+
     def set_block_at(self, world_x, world_y, world_z, block_type):
         """Set block type at world coordinates"""
         chunk_x, chunk_z = self.world_to_chunk_coords(world_x, world_z)
         chunk = self.get_chunk(chunk_x, chunk_z)
-        
+
         if chunk:
-            from world.modern_chunk import CHUNK_SIZE
             # Convert world coordinates to local chunk coordinates
             local_x = int(world_x - chunk_x * CHUNK_SIZE)
             local_z = int(world_z - chunk_z * CHUNK_SIZE)
             chunk.set_block(local_x, int(world_y), local_z, block_type)
             return True
-        
+
         return False
     
     def render_chunks(self, view_matrix=None, proj_matrix=None):

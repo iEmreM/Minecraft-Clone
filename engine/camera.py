@@ -3,6 +3,10 @@ import math
 
 
 class Camera:
+    # Skin width for the collision box. Large enough to absorb the float noise
+    # left by per-axis resolution, small enough to be invisible at block scale.
+    COLLISION_SKIN = 1e-3
+
     def __init__(self, position=(0, 0, 0), yaw=-90.0, pitch=-20.0):
         # Camera attributes
         self.position = glm.vec3(*position)
@@ -88,83 +92,68 @@ class Camera:
         self.update_camera_vectors()
     
     def get_bounding_box(self, pos):
-        """Get player bounding box"""
+        """Player AABB in world space, as {x1,x2,y1,y2,z1,z2} with x1 < x2 etc.
+
+        *pos* is the eye position; the body hangs player_height below it. The box
+        is inset on every side by COLLISION_SKIN so that resting flush against a
+        surface does not read as an overlap. Without that inset, feet sitting
+        exactly on a block top make floor(y1) land on the floor block itself, so
+        every horizontal step collides with the ground the player is standing on
+        — which is what snagged the player on the seam where two blocks meet.
+        """
         half_width = self.player_width / 2
-        half_height = self.player_height / 2
+        skin = self.COLLISION_SKIN
         return {
-            'x1': pos.x - half_width,
-            'x2': pos.x - self.player_width*2,
-            'y1': pos.y - self.player_height,
-            'y2': pos.y - half_height,
-            'z1': pos.z - half_width,
-            'z2': pos.z - self.player_width*2
+            'x1': pos.x - half_width + skin,
+            'x2': pos.x + half_width - skin,
+            'y1': pos.y - self.player_height + skin,
+            'y2': pos.y - skin,
+            'z1': pos.z - half_width + skin,
+            'z2': pos.z + half_width - skin
         }
-    
+
+    def _box_hits_block(self, bbox):
+        """True if any non-air block overlaps *bbox*."""
+        for block_x in range(int(math.floor(bbox['x1'])), int(math.floor(bbox['x2'])) + 1):
+            for block_y in range(int(math.floor(bbox['y1'])), int(math.floor(bbox['y2'])) + 1):
+                for block_z in range(int(math.floor(bbox['z1'])), int(math.floor(bbox['z2'])) + 1):
+                    if self.world.get_block_at(block_x, block_y, block_z) != 0:
+                        return True
+        return False
+
     def check_collision_axis(self, old_pos, new_pos, axis):
-        """Check collision along a specific axis"""
+        """Return the coordinate the player may actually occupy on *axis*.
+
+        Each axis is resolved against old_pos independently, which is what lets
+        the player slide along a wall instead of stopping dead against it.
+        """
         if not self.world:
-            return new_pos
-        
+            return getattr(new_pos, axis)
+
         # Create test position with only this axis changed
         test_pos = glm.vec3(old_pos)
-        if axis == 'x':
-            test_pos.x = new_pos.x
-        elif axis == 'y':
-            test_pos.y = new_pos.y
-        elif axis == 'z':
-            test_pos.z = new_pos.z
-        
-        bbox = self.get_bounding_box(test_pos)
-        
-        # Check all blocks in bounding box range
-        min_x = int(math.floor(bbox['x1']))
-        max_x = int(math.ceil(bbox['x2']))
-        min_y = int(math.floor(bbox['y1']))
-        max_y = int(math.ceil(bbox['y2']))
-        min_z = int(math.floor(bbox['z1']))
-        max_z = int(math.ceil(bbox['z2']))
-        
-        for block_x in range(min_x, max_x + 1):
-            for block_y in range(min_y, max_y + 1):
-                for block_z in range(min_z, max_z + 1):
-                    if self.world.get_block_at(block_x, block_y, block_z) != 0:
-                        # Block collision detected
-                        if axis == 'x':
-                            return old_pos.x
-                        elif axis == 'y':
-                            return old_pos.y
-                        elif axis == 'z':
-                            return old_pos.z
-        
-        # No collision
-        if axis == 'x':
-            return new_pos.x
-        elif axis == 'y':
-            return new_pos.y
-        elif axis == 'z':
-            return new_pos.z
-    
+        setattr(test_pos, axis, getattr(new_pos, axis))
+
+        if self._box_hits_block(self.get_bounding_box(test_pos)):
+            return getattr(old_pos, axis)
+        return getattr(new_pos, axis)
+
     def is_on_ground(self):
         """Check if player is standing on solid ground"""
         if not self.world:
             return False
-        
+
         # Check slightly below feet
         test_pos = glm.vec3(self.position.x, self.position.y - self.ground_tolerance, self.position.z)
         bbox = self.get_bounding_box(test_pos)
-        
-        # Only check Y level at feet
+
+        # Only check the Y level at the feet
         check_y = int(math.floor(bbox['y1']))
-        min_x = int(math.floor(bbox['x1']))
-        max_x = int(math.ceil(bbox['x2']))
-        min_z = int(math.floor(bbox['z1']))
-        max_z = int(math.ceil(bbox['z2']))
-        
-        for block_x in range(min_x, max_x + 1):
-            for block_z in range(min_z, max_z + 1):
+        for block_x in range(int(math.floor(bbox['x1'])), int(math.floor(bbox['x2'])) + 1):
+            for block_z in range(int(math.floor(bbox['z1'])), int(math.floor(bbox['z2'])) + 1):
                 if self.world.get_block_at(block_x, check_y, block_z) != 0:
                     return True
-        
+
         return False
     
     def update_physics(self, delta_time):
