@@ -4,7 +4,7 @@ import threading
 import queue
 import time
 from world.modern_chunk import ModernChunk, CHUNK_SIZE
-from world.fast_builder import build_chunk_mesh_fast, NO_NEIGHBOR
+from world.fast_builder import build_chunk_mesh_fast, make_mesh_buffers, NO_NEIGHBOR
 from engine.frustum import Frustum
 
 class ThreadedChunkManager:
@@ -84,10 +84,12 @@ class ThreadedChunkManager:
 
         # Mesh only after every chunk exists, so each one can see its neighbors
         # and skip the seam faces they cover.
+        scratch_vertices, scratch_indices = make_mesh_buffers()
         for chunk_x, chunk_z in generated:
             chunk = self.chunks[(chunk_x, chunk_z)]
             vertices, indices = build_chunk_mesh_fast(
-                chunk.blocks, chunk_x, chunk_z, self._neighbor_blocks(chunk_x, chunk_z))
+                chunk.blocks, chunk_x, chunk_z, self._neighbor_blocks(chunk_x, chunk_z),
+                scratch_vertices, scratch_indices)
             chunk.upload_mesh(vertices, indices)
 
         generated_count = len(generated)
@@ -122,6 +124,10 @@ class ThreadedChunkManager:
     
     def _chunk_worker(self):
         """Background thread worker for chunk loading and mesh building"""
+        # Owned by this thread for its whole life, so meshing allocates nothing
+        # big and nothing is shared with the main thread's own set.
+        scratch_vertices, scratch_indices = make_mesh_buffers()
+
         while not self.should_stop:
             try:
                 did_work = False
@@ -163,7 +169,8 @@ class ThreadedChunkManager:
                     # Build mesh in background thread. The neighbor arrays were
                     # picked up on the main thread when the request was queued.
                     vertices_array, indices_array = build_chunk_mesh_fast(
-                        chunk.blocks, chunk.chunk_x, chunk.chunk_z, mesh_request['neighbors']
+                        chunk.blocks, chunk.chunk_x, chunk.chunk_z, mesh_request['neighbors'],
+                        scratch_vertices, scratch_indices
                     )
                     
                     # Queue completed mesh for main thread

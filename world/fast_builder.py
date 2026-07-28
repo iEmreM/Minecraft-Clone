@@ -13,6 +13,21 @@ WATER = 8
 # neighbors at all. Shared and never written to.
 NO_NEIGHBOR = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=np.uint8)
 
+# Ceiling on quads per chunk. Generated terrain peaks around 3200, so this is
+# mostly headroom for player-built geometry.
+MAX_FACES = 20000
+
+
+def make_mesh_buffers():
+    """Scratch space for build_chunk_mesh_fast: one set per meshing thread.
+
+    The builder used to allocate these itself, so every chunk malloc'd and threw
+    away 2.7 MB to fill about 7% of it. Owning them per caller keeps that off
+    the hot path without sharing anything across threads.
+    """
+    return (np.empty(MAX_FACES * 4 * 7, dtype=np.float32),
+            np.empty(MAX_FACES * 6, dtype=np.uint32))
+
 @njit(nogil=True, fastmath=True, cache=True)
 def get_block_ext(blocks, neighbors, x, y, z):
     """Block at chunk-local (x, y, z), reaching into a neighbor when x or z is
@@ -279,22 +294,22 @@ def emit_greedy_quad(vertices, offset, chunk_x, chunk_z, x, y, z, width, height,
         vertices[base+6] = shading * AO_LEVELS[(ao_code >> (2 * i)) & 3]
 
 @njit(nogil=True, fastmath=True, cache=True)
-def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors):
+def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices):
     """
     Fast chunk mesh builder using Greedy Meshing (Texture Array version)
 
     *neighbors* is the (-X, +X, -Z, +Z) tuple of neighbor block arrays; see
     get_block_ext. Pass NO_NEIGHBOR for any chunk that is not loaded.
-    Returns (vertices, indices)
+
+    *vertices* and *indices* are reusable scratch space from make_mesh_buffers;
+    the caller keeps one set per meshing thread. Returns fresh right-sized
+    copies of the part that was filled, so the scratch is free again on return.
     """
-    max_faces = 20000 
-    # 7 floats per vertex now (pos3 + uv3 + shading1)
-    vertices = np.empty(max_faces * 4 * 7, dtype=np.float32)
-    indices = np.empty(max_faces * 6, dtype=np.uint32)
-    
+    max_faces = MAX_FACES
+
     vertex_count = 0
     index_count = 0
-    
+
     # Only scan up to the highest block plus one layer of air for its top face.
     # Chunks are 256 tall but terrain tops out around 30-80, so the untrimmed
     # sweep spent most of its time on empty sky.
@@ -423,4 +438,6 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors):
                     else:
                         u += 1
 
-    return vertices[:vertex_count*7], indices[:index_count]
+    # Copies, not views: the scratch buffer is about to be reused, and a view
+    # would also pin all 2.7 MB of it for as long as the mesh sits in a queue.
+    return vertices[:vertex_count*7].copy(), indices[:index_count].copy()
