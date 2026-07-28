@@ -93,12 +93,6 @@ class ModernGLRenderer:
         if self.chunk_program:
             self.chunk_program['m_view'].write(view_matrix.to_bytes())
     
-    def set_model_matrix(self, model_matrix):
-        """Set the model matrix for rendering"""
-        # OPTIMIZATION: m_model removed - shader compiler optimizes it out
-        # Keeping this function for API compatibility but it does nothing now
-        pass
-    
     def update_matrices(self, view_matrix, model_matrix=None):
         """Update projection, view, and model matrices"""
         if not self.chunk_program:

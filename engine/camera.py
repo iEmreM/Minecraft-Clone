@@ -229,14 +229,6 @@ class Camera:
                 self.position.y = final_y
                 self.on_ground = self.is_on_ground()
         
-        # Do not reset strafe here! 
-        # main.py resets strafe once per frame, enabling all 8 
+        # Do not reset strafe here!
+        # main.py resets strafe once per frame, enabling all 8
         # physical sub-steps to process horizontal velocity properly.
-    
-    def process_keyboard(self, direction, velocity):
-        """Simple movement for flying mode vertical movement"""
-        if self.flying:
-            if direction == "UP":
-                self.position.y += velocity
-            elif direction == "DOWN":
-                self.position.y -= velocity

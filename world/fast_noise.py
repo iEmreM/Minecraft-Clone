@@ -9,14 +9,6 @@ import math
 def fast_floor(x):
     return int(x) if x >= 0 else int(x) - 1
 
-@njit(nogil=True, fastmath=True, cache=True)
-def dot2(g, x, y):
-    return g[0]*x + g[1]*y
-
-@njit(nogil=True, fastmath=True, cache=True)
-def dot3(g, x, y, z):
-    return g[0]*x + g[1]*y + g[2]*z
-
 # Permutation table
 _perm = np.array([
     151,160,137,91,90,15,
@@ -53,15 +45,6 @@ GRAD3 = np.array([
     1,0,1, -1,0,1, 1,0,-1, -1,0,-1,
     0,1,1, 0,-1,1, 0,1,-1, 0,-1,-1
 ], dtype=np.int32)
-
-@njit(nogil=True, fastmath=True, cache=True)
-def seed_noise(seed):
-    """Simple seeding by permuting the table based on seed"""
-    np.random.seed(seed)
-    # We can't modify global array inside njit easily if it's constant
-    # So we return a new perm table or just use different offsets?
-    # For now, let's keep it static but allow offset input
-    pass
 
 @njit(nogil=True, fastmath=True, cache=True)
 def fast_noise2(x, y):

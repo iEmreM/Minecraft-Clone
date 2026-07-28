@@ -11,7 +11,7 @@ Features:
 import numpy as np
 import math
 from numba import njit
-from world.fast_noise import fast_noise2, fast_noise3, seed_noise
+from world.fast_noise import fast_noise2, fast_noise3
 
 # Block type constants
 AIR = 0

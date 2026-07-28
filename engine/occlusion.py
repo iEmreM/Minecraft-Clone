@@ -1,112 +1,8 @@
 import glm
 import math
-import numpy as np
-from typing import Dict, Set, Tuple, List
-import moderngl as mgl
-
-class HierarchicalZBuffer:
-    """Hierarchical Z-Buffer for efficient occlusion culling"""
-    
-    def __init__(self, ctx, width=512, height=512):
-        self.ctx = ctx
-        self.width = width
-        self.height = height
-        self.levels = int(math.log2(min(width, height))) + 1
-        
-        # Create depth pyramid textures
-        self.depth_textures = []
-        current_width, current_height = width, height
-        
-        for level in range(self.levels):
-            texture = ctx.texture((current_width, current_height), 1, dtype=np.float32)
-            texture.filter = (mgl.NEAREST, mgl.NEAREST)
-            self.depth_textures.append(texture)
-            
-            current_width = max(1, current_width // 2)
-            current_height = max(1, current_height // 2)
-        
-        # Create framebuffers for each level
-        self.framebuffers = []
-        for texture in self.depth_textures:
-            fbo = ctx.framebuffer(depth_attachment=texture)
-            self.framebuffers.append(fbo)
-    
-    def update_depth_pyramid(self, scene_depth_texture):
-        """Update the depth pyramid from the scene depth buffer"""
-        # Copy scene depth to level 0
-        self.ctx.copy_framebuffer(self.framebuffers[0], self.ctx.screen)
-        
-        # Generate mip levels by downsampling
-        for level in range(1, self.levels):
-            source_fbo = self.framebuffers[level - 1]
-            target_fbo = self.framebuffers[level]
-            
-            # Simple downsampling (take max depth of 2x2 quad)
-            self.ctx.copy_framebuffer(target_fbo, source_fbo)
-    
-    def test_occlusion(self, bbox_min, bbox_max, view_proj_matrix):
-        """Test if a bounding box is occluded using the depth pyramid"""
-        # Project bounding box to screen space
-        corners = [
-            glm.vec4(bbox_min.x, bbox_min.y, bbox_min.z, 1.0),
-            glm.vec4(bbox_max.x, bbox_min.y, bbox_min.z, 1.0),
-            glm.vec4(bbox_min.x, bbox_max.y, bbox_min.z, 1.0),
-            glm.vec4(bbox_max.x, bbox_max.y, bbox_min.z, 1.0),
-            glm.vec4(bbox_min.x, bbox_min.y, bbox_max.z, 1.0),
-            glm.vec4(bbox_max.x, bbox_min.y, bbox_max.z, 1.0),
-            glm.vec4(bbox_min.x, bbox_max.y, bbox_max.z, 1.0),
-            glm.vec4(bbox_max.x, bbox_max.y, bbox_max.z, 1.0),
-        ]
-        
-        # Transform to clip space
-        screen_coords = []
-        min_z = float('inf')
-        
-        for corner in corners:
-            clip_pos = view_proj_matrix * corner
-            if clip_pos.w <= 0:
-                return False  # Behind camera
-            
-            ndc = clip_pos / clip_pos.w
-            screen_x = (ndc.x + 1.0) * 0.5 * self.width
-            screen_y = (ndc.y + 1.0) * 0.5 * self.height
-            screen_z = ndc.z
-            
-            screen_coords.append((screen_x, screen_y, screen_z))
-            min_z = min(min_z, screen_z)
-        
-        # Find screen space bounding box
-        min_x = min(coord[0] for coord in screen_coords)
-        max_x = max(coord[0] for coord in screen_coords)
-        min_y = min(coord[1] for coord in screen_coords)
-        max_y = max(coord[1] for coord in screen_coords)
-        
-        # Clamp to screen bounds
-        min_x = max(0, min_x)
-        max_x = min(self.width - 1, max_x)
-        min_y = max(0, min_y)
-        max_y = min(self.height - 1, max_y)
-        
-        if min_x >= max_x or min_y >= max_y:
-            return True  # Outside screen
-        
-        # Choose appropriate mip level based on size
-        size = max(max_x - min_x, max_y - min_y)
-        mip_level = max(0, min(self.levels - 1, int(math.log2(size))))
-        
-        # Sample depth at that mip level (simplified - would need actual GPU sampling)
-        # For now, return False (not occluded) to avoid false positives
-        return False
-    
-    def cleanup(self):
-        """Clean up GPU resources"""
-        for texture in self.depth_textures:
-            texture.release()
-        for fbo in self.framebuffers:
-            fbo.release()
 
 class OcclusionCuller:
-    """Advanced occlusion culling system using Hierarchical Z-Buffer technique"""
+    """Occlusion culling based on conservative angular coverage between chunks"""
     
     def __init__(self, chunk_size=16, chunk_height=256):
         self.chunk_size = chunk_size
@@ -123,8 +19,6 @@ class OcclusionCuller:
         self.occlusion_threshold = 0.95  # Much more conservative threshold
         self.min_chunk_distance = 3  # Don't occlude very close chunks
         
-        # HiZ buffer (will be initialized when we have GL context)
-        self.hiz_buffer = None
         
     def clear_cache(self):
         """Clear the visibility cache"""

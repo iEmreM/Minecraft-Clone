@@ -258,11 +258,7 @@ class MinecraftModernGL:
                 self.camera.position.y += self.movement_speed * self.delta_time
             if keys[pg.K_LSHIFT]:
                 self.camera.position.y -= self.movement_speed * self.delta_time
-        
-        # Block type selection — kept in sync with hotbar slot (handled in handle_events)
-        # These are left here as no-ops so existing key handling in handle_events is the source of truth.
-        pass
-    
+
     def update(self):
         """Update game state"""
         # Calculate delta time

@@ -5,7 +5,6 @@ layout (location = 1) in vec3 in_position;
 
 uniform mat4 m_proj;
 uniform mat4 m_view;
-uniform mat4 m_view_proj;
 uniform int water_area;
 uniform float water_line;
 
