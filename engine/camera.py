@@ -7,6 +7,21 @@ class Camera:
     # left by per-axis resolution, small enough to be invisible at block scale.
     COLLISION_SKIN = 1e-3
 
+    # How quickly horizontal velocity chases the direction the keys ask for, in
+    # 1/s. One rate covers both speeding up and slowing down, the way Minecraft
+    # uses a single friction factor per tick for both.
+    #
+    # Minecraft multiplies horizontal velocity by 0.91 * 0.6 each tick on the
+    # ground and by 0.91 in the air, at 20 ticks per second:
+    #     -ln(0.546) * 20 = 12.1     -ln(0.91) * 20 = 1.9
+    # The six-fold gap is the whole feel of it. On the ground you are at speed
+    # within about 0.1 s and stop about as fast. In the air the same change takes
+    # over half a second, so a jump carries the momentum it started with and can
+    # only be steered a little — which is what stops mid-air strafing from
+    # behaving like walking on solid floor.
+    GROUND_RESPONSE = 12.1
+    AIR_RESPONSE = 1.9
+
     def __init__(self, position=(0, 0, 0), yaw=-90.0, pitch=-20.0):
         # Camera attributes
         self.position = glm.vec3(*position)
@@ -169,9 +184,16 @@ class Camera:
         return False
     
     def update_physics(self, delta_time):
-        """Update physics with proper collision detection"""
+        """Update physics with proper collision detection.
+
+        Horizontal motion goes through self.velocity rather than moving the
+        position straight from the key state, so the player carries momentum:
+        letting go of the keys coasts to a stop instead of stopping dead, and a
+        jump keeps the speed it took off with. GROUND_RESPONSE / AIR_RESPONSE
+        set how fast that velocity can be changed.
+        """
         old_pos = glm.vec3(self.position)
-        
+
         # Apply gravity
         if not self.flying:
             self.velocity.y += self.gravity * delta_time
@@ -179,39 +201,59 @@ class Camera:
                 self.velocity.y = self.terminal_velocity
         else:
             self.velocity.y = 0
-        
+
         # Calculate horizontal movement
         if self.flying:
             speed = self.fly_speed * (2.0 if self.sprinting else 1.0)
         else:
             speed = self.sprint_speed if self.sprinting else self.walk_speed
-            
-        movement = glm.vec3(0.0)
-        
+
+        # The velocity the keys are asking for, normalised so that holding two
+        # directions at once is not 41% faster than holding one.
+        wish = glm.vec3(0.0)
+
         if self.strafe[0] != 0:  # Forward/backward
             # Use yaw to construct a robust horizontal forward vector for both walking and flying
             yaw_rad = glm.radians(self.yaw)
             horizontal_front = glm.vec3(math.cos(yaw_rad), 0.0, math.sin(yaw_rad))
-            movement += horizontal_front * self.strafe[0] * speed * delta_time
-        
+            wish += horizontal_front * self.strafe[0]
+
         if self.strafe[1] != 0:  # Left/right
-            movement += self.right * self.strafe[1] * speed * delta_time
-        
+            wish += self.right * self.strafe[1]
+
+        if wish.x != 0.0 or wish.z != 0.0:
+            wish = glm.normalize(wish) * speed
+
+        # Approach that velocity exponentially. Flying counts as grounded: it is
+        # not a fall, and floaty controls there just feel unresponsive.
+        response = self.GROUND_RESPONSE if (self.on_ground or self.flying) else self.AIR_RESPONSE
+        blend = 1.0 - math.exp(-response * delta_time)
+        self.velocity.x += (wish.x - self.velocity.x) * blend
+        self.velocity.z += (wish.z - self.velocity.z) * blend
+
         # Calculate new position
         new_pos = glm.vec3(
-            old_pos.x + movement.x,
+            old_pos.x + self.velocity.x * delta_time,
             old_pos.y + (self.velocity.y * delta_time if not self.flying else 0),
-            old_pos.z + movement.z
+            old_pos.z + self.velocity.z * delta_time
         )
-        
+
         # Test collision for each axis separately
         final_x = self.check_collision_axis(old_pos, new_pos, 'x')
         final_z = self.check_collision_axis(old_pos, new_pos, 'z')
-        
+
+        # Walking into a wall spends that component instead of banking it, so
+        # sliding along the wall and then stepping away does not fling the
+        # player off with the speed it built up against it.
+        if final_x != new_pos.x:
+            self.velocity.x = 0.0
+        if final_z != new_pos.z:
+            self.velocity.z = 0.0
+
         # Apply horizontal movement
         self.position.x = final_x
         self.position.z = final_z
-        
+
         # Handle vertical movement (gravity/jumping)
         if not self.flying:
             final_y = self.check_collision_axis(old_pos, new_pos, 'y')
