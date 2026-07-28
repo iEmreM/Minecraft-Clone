@@ -70,8 +70,6 @@ class MinecraftModernGL:
         print("- 1-8: Select block type (Grass/Dirt/Stone/Sand/Snow/Leaves/Wood/Water)")
         print("- +/-: Increase/Decrease render distance")
         print("- F: Toggle frustum culling")
-        print("- O: Toggle occlusion culling")
-        print("- C: Toggle conservative occlusion mode")
         print("")
         print("Physics: Gravity, jumping, and block collision enabled!")
         print("Walking speed: 5 blocks/sec, Flying speed: 15 blocks/sec")
@@ -167,10 +165,6 @@ class MinecraftModernGL:
                         print(f"Render distance decreased to: {new_distance}")
                 elif event.key == pg.K_f:  # F key to toggle frustum culling
                     self.chunk_manager.toggle_frustum_culling()
-                elif event.key == pg.K_o:  # O key to toggle occlusion culling
-                    self.chunk_manager.toggle_occlusion_culling()
-                elif event.key == pg.K_c:  # C key to toggle conservative occlusion mode
-                    self.chunk_manager.toggle_occlusion_conservative_mode()
                 elif event.key == pg.K_TAB:  # TAB key to toggle flying mode
                     self.camera.toggle_flying()
                 elif event.key == pg.K_SPACE:  # SPACE key to jump (in keydown for single press)
@@ -296,25 +290,23 @@ class MinecraftModernGL:
         cached_chunks = chunk_info['cached_chunks']
         explored_chunks = chunk_info['explored_chunks']
         frustum_enabled = chunk_info['frustum_culling']
-        occlusion_enabled = chunk_info['occlusion_culling']
-        
+
         # Include culling stats if available
         if hasattr(self, 'rendered_chunks') and hasattr(self, 'total_chunks'):
             culling_info = f"L:{chunks_loaded} C:{cached_chunks} E:{explored_chunks} R:{self.rendered_chunks}/{self.total_chunks}"
-            if hasattr(self, 'frustum_culled') and hasattr(self, 'occlusion_culled'):
-                culling_info += f" (F:{self.frustum_culled} O:{self.occlusion_culled})"
+            if hasattr(self, 'frustum_culled'):
+                culling_info += f" (F:{self.frustum_culled})"
         else:
             culling_info = f"L:{chunks_loaded} C:{cached_chunks} E:{explored_chunks} P:{pending_chunks}"
-        
+
         frustum_status = "FC:ON" if frustum_enabled else "FC:OFF"
-        occlusion_status = "OC:ON" if occlusion_enabled else "OC:OFF"
-        
+
         if self.camera.flying:
             move_status = "FLY(SPRINT)" if self.camera.sprinting else "FLY"
         else:
             move_status = "SPRINT" if self.camera.sprinting else "WALK"
             
-        pg.display.set_caption(f'Minecraft ModernGL - FPS: {fps:.0f} | Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}) | {move_status} | Block: {selected_name} | Chunks: {culling_info} | RD: {self.render_distance} | {frustum_status} | {occlusion_status}')
+        pg.display.set_caption(f'Minecraft ModernGL - FPS: {fps:.0f} | Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}) | {move_status} | Block: {selected_name} | Chunks: {culling_info} | RD: {self.render_distance} | {frustum_status}')
     
     def render(self):
         """Render the game"""
@@ -334,15 +326,14 @@ class MinecraftModernGL:
         elapsed_time = time.time() - self.start_time
         self.renderer.render_sky(view_matrix, elapsed_time)
         
-        # Render chunks using chunk manager with frustum and occlusion culling
-        rendered_chunks, total_chunks, frustum_culled, occlusion_culled = self.chunk_manager.render_chunks(
-            view_matrix, self.renderer.proj_matrix, self.camera.position)
-        
+        # Render chunks using chunk manager with frustum culling
+        rendered_chunks, total_chunks, frustum_culled = self.chunk_manager.render_chunks(
+            view_matrix, self.renderer.proj_matrix)
+
         # Store rendering stats for display
         self.rendered_chunks = rendered_chunks
         self.total_chunks = total_chunks
         self.frustum_culled = frustum_culled
-        self.occlusion_culled = occlusion_culled
         
         # Render water surface after chunks (for proper transparency)
         self.renderer.render_water_surface(view_matrix, self.camera.position)

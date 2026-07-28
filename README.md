@@ -15,7 +15,7 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 - **Infinite world:** Terrain is procedurally generated using fast noise and loads dynamically as you explore — there are no borders or pre-built maps.
 - **Block interaction:** Raycasted placement and removal with an 8-block reach, supporting eight distinct block types: Grass, Dirt, Stone, Sand, Snow, Leaves, Wood, and Water.
 - **Walking & flying:** Switch between grounded movement with gravity and collision, and a free-flying mode useful for building or just exploring quickly.
-- **Performance-first rendering:** Render distance is adjustable at runtime (2–96 chunks), chunk geometry is built in background threads so the game never freezes mid-exploration, and both frustum and occlusion culling trim down what actually gets sent to the GPU.
+- **Performance-first rendering:** Render distance is adjustable at runtime (2–96 chunks), chunk geometry is built in background threads so the game never freezes mid-exploration, and frustum culling trims down what actually gets sent to the GPU.
 - **Visual detail:** Custom GLSL shaders, a procedural sky, ambient occlusion on block faces, and a transparent animated water surface.
 
 ## Controls
@@ -33,7 +33,6 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 | Select Block Type | `1` - `8` |
 | Adjust Render Distance | `+` / `-` |
 | Toggle Frustum Culling | `F` |
-| Toggle Occlusion Culling | `O` |
 
 ## Installation & Setup
 
@@ -77,7 +76,7 @@ The architecture is designed to overcome Python's performance bottlenecks when h
 ### Key Subsystems
 - **ThreadedChunkManager:** Chunk generation and mesh building run on worker threads, so the main loop stays smooth even when loading new areas of the world.
 - **FastBuilder:** Uses greedy meshing — adjacent faces of the same block type are merged into a single quad rather than drawn individually, which significantly cuts vertex count and GPU load.
-- **Culling Pipeline:** Frustum culling discards chunks entirely outside the camera's view, and occlusion culling skips chunks hidden behind solid geometry. Both can be toggled at runtime for comparison.
+- **Frustum Culling:** Chunks entirely outside the camera's view are discarded before they ever reach the GPU. Can be toggled at runtime for comparison.
 
 ## Project Structure
 

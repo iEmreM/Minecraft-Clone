@@ -5,7 +5,6 @@ import queue
 import time
 from world.modern_chunk import ModernChunk
 from engine.frustum import Frustum
-from engine.occlusion import OcclusionCuller
 
 class ThreadedChunkManager:
     """Manages dynamic chunk loading and unloading with background threading to eliminate lag"""
@@ -42,14 +41,7 @@ class ThreadedChunkManager:
         # Frustum culling
         self.frustum = Frustum()
         self.enable_frustum_culling = True
-        
-        # Occlusion culling
-        self.occlusion_culler = OcclusionCuller()
-        self.enable_occlusion_culling = True
-        
-        # Conservative mode by default to prevent over-culling
-        self.occlusion_culler.set_conservative_mode(True)
-        
+
         # Start background thread
         self.start_background_thread()
         
@@ -126,9 +118,11 @@ class ThreadedChunkManager:
         """Background thread worker for chunk loading and mesh building"""
         while not self.should_stop:
             try:
+                did_work = False
+
                 # Check for chunk loading requests
                 try:
-                    operation = self.chunk_queue.get(timeout=0.1)
+                    operation = self.chunk_queue.get_nowait()
                     if operation['type'] == 'load':
                         chunk_x, chunk_z = operation['coords']
                         
@@ -148,12 +142,13 @@ class ThreadedChunkManager:
                     elif operation['type'] == 'unload':
                         chunk_x, chunk_z = operation['coords']
                         self.chunks_to_unload.put((chunk_x, chunk_z))
+                    did_work = True
                 except queue.Empty:
                     pass
-                
+
                 # Check for mesh building requests (priority queue format)
                 try:
-                    priority_item = self.mesh_build_queue.get(timeout=0.01)
+                    priority_item = self.mesh_build_queue.get_nowait()
                     # PriorityQueue returns (priority, counter, data) tuple
                     priority, counter, mesh_request = priority_item
                     chunk_coords = mesh_request['coords']
@@ -171,9 +166,18 @@ class ThreadedChunkManager:
                         'vertices': vertices_array,
                         'indices': indices_array
                     })
+                    did_work = True
                 except queue.Empty:
                     pass
-                    
+
+                # Idle only when BOTH queues are empty. Blocking on the chunk
+                # queue used to stall the worker 0.1 s per loop, capping mesh
+                # output at ~10/sec no matter how deep the backlog was.
+                # ponytail: 2 ms poll instead of a condition variable — swap in
+                # threading.Event if this thread ever shows up in a profile.
+                if not did_work:
+                    time.sleep(0.002)
+
             except Exception as e:
                 print(f"Error in chunk worker thread: {e}")
                 time.sleep(0.1)
@@ -467,17 +471,16 @@ class ThreadedChunkManager:
         
         return False
     
-    def render_chunks(self, view_matrix=None, proj_matrix=None, camera_pos=None):
-        """Render all loaded chunks with optional frustum and occlusion culling"""
+    def render_chunks(self, view_matrix=None, proj_matrix=None):
+        """Render all loaded chunks with optional frustum culling"""
         with self.thread_lock:
             chunks_to_render = list(self.chunks.items())
-        
+
         total_chunks = len(chunks_to_render)
         frustum_culled = 0
-        occlusion_culled = 0
         rendered_chunks = 0
-        
-        # Apply frustum culling first if enabled
+
+        # Apply frustum culling if enabled
         if self.enable_frustum_culling and view_matrix is not None and proj_matrix is not None:
             view_proj_matrix = proj_matrix * view_matrix
             self.frustum.extract_planes(view_proj_matrix)
@@ -492,14 +495,7 @@ class ThreadedChunkManager:
                     frustum_culled += 1
             
             chunks_to_render = frustum_visible_chunks
-        
-        # Apply occlusion culling if enabled and camera position is available
-        if self.enable_occlusion_culling and camera_pos is not None:
-            # Filter chunks using occlusion culling
-            occlusion_visible_chunks = self.occlusion_culler.filter_visible_chunks(camera_pos, chunks_to_render)
-            occlusion_culled = len(chunks_to_render) - len(occlusion_visible_chunks)
-            chunks_to_render = occlusion_visible_chunks
-        
+
         # Render the remaining visible chunks (solid blocks first)
         for chunk_coords, chunk in chunks_to_render:
             chunk.render()
@@ -510,8 +506,8 @@ class ThreadedChunkManager:
             if hasattr(chunk, 'render_transparent'):
                 chunk.render_transparent()
         
-        return rendered_chunks, total_chunks, frustum_culled, occlusion_culled
-    
+        return rendered_chunks, total_chunks, frustum_culled
+
     def cleanup(self):
         """Clean up all chunks and resources"""
         print("ThreadedChunkManager cleanup...")
@@ -551,9 +547,7 @@ class ThreadedChunkManager:
                 'explored_chunks': len(self.explored_chunks),
                 'queue_size': self.chunk_queue.qsize(),
                 'completed_queue_size': self.completed_chunks.qsize(),
-                'frustum_culling': self.enable_frustum_culling,
-                'occlusion_culling': self.enable_occlusion_culling,
-                'occlusion_cache_size': len(self.occlusion_culler.visibility_cache) if self.occlusion_culler else 0
+                'frustum_culling': self.enable_frustum_culling
             }
     
     def toggle_frustum_culling(self):
@@ -561,19 +555,3 @@ class ThreadedChunkManager:
         self.enable_frustum_culling = not self.enable_frustum_culling
         print(f"Frustum culling: {'enabled' if self.enable_frustum_culling else 'disabled'}")
         return self.enable_frustum_culling
-    
-    def toggle_occlusion_culling(self):
-        """Toggle occlusion culling on/off"""
-        self.enable_occlusion_culling = not self.enable_occlusion_culling
-        if self.occlusion_culler:
-            self.occlusion_culler.toggle_occlusion_culling()
-        print(f"Occlusion culling: {'enabled' if self.enable_occlusion_culling else 'disabled'}")
-        return self.enable_occlusion_culling
-    
-    def toggle_occlusion_conservative_mode(self):
-        """Toggle conservative occlusion culling mode"""
-        if self.occlusion_culler:
-            # Check current threshold to determine mode
-            is_conservative = self.occlusion_culler.occlusion_threshold >= 0.99
-            self.occlusion_culler.set_conservative_mode(not is_conservative)
-        return not is_conservative
