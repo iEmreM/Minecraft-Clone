@@ -1,4 +1,5 @@
 import math
+import os
 import glm
 import threading
 import queue
@@ -7,8 +8,51 @@ from world.modern_chunk import ModernChunk, CHUNK_SIZE
 from world.fast_builder import build_chunk_mesh_fast, make_mesh_buffers, NO_NEIGHBOR
 from engine.frustum import Frustum
 
+HALF_CHUNK = CHUNK_SIZE / 2
+
+# Where each LOD level takes over, in chunks from the player's chunk: level 0
+# out to the first entry, level 1 out to the second, level 2 beyond — see
+# build_chunk_mesh_fast for what each level gives up.
+#
+# Level 1 seals caves, which cannot be seen from outside the terrain — but it
+# can be seen from *inside*, down a straight tunnel, and a player digging one
+# would find it walled off. So the first ring is not set by what is visible
+# from outside; it is set by how far anyone could see along a cave they are
+# standing in. 128 blocks is past any natural cave (the carving noise turns
+# over every ~11 blocks) and past most dug ones, and widening the ring from 48
+# to 128 blocks costs 0.4 ms and 8% of the saving at render distance 16.
+# ponytail: a hand-dug tunnel longer than 128 blocks still ends in a wall —
+# gate sealing on the player being above ground if that ever comes up.
+#
+# Level 2 also drops per-corner AO, and that one is a real (if small) change,
+# so it waits until a block is only a couple of pixels across. At 1200x800 and
+# a 65 degree FOV a block covers about 628/d pixels, so at 16 chunks it is
+# 2.5 px and an AO gradient one block wide has nowhere left to show. That also
+# keeps AO everywhere at any render distance up to 16.
+#
+# Calibration, not structure: a wider FOV or a taller window makes a block
+# cover more pixels and wants the second ring pushed out.
+LOD_DISTANCES = (8, 16)
+LOD_DISTANCES_SQ = tuple(d * d for d in LOD_DISTANCES)
+
 class ThreadedChunkManager:
     """Manages dynamic chunk loading and unloading with background threading to eliminate lag"""
+
+    # Worker threads. The terrain and meshing kernels are @njit(nogil=True), so
+    # these genuinely run at the same time rather than taking turns on the GIL.
+    # Deliberately only a slice of the machine: a game should not grab every
+    # core it can see, and past four the main thread's VAO uploads become the
+    # limit anyway.
+    WORKER_COUNT = max(1, min(4, (os.cpu_count() or 2) - 2))
+
+    # How long the main thread may spend folding finished chunks and meshes into
+    # the world per frame. A fixed count alone is not enough: the workers can
+    # produce faster than the main thread can upload, so a full batch of twelve
+    # VAO uploads landing on one frame turned into a 25 ms hitch. A deadline
+    # bounds that no matter how deep the backlog gets — the leftovers simply
+    # arrive next frame.
+    INTEGRATION_BUDGET = 0.003      # seconds
+
     
     def __init__(self, renderer, render_distance=8):
         self.renderer = renderer
@@ -28,12 +72,16 @@ class ThreadedChunkManager:
         self.chunks_to_pregenerate = 20  # Number of chunks around spawn to generate
         
         # Threading components
-        self.loading_thread = None
+        self.worker_threads = []
         self.should_stop = False
         self.chunk_queue = queue.Queue()  # Queue for chunk operations
         self.completed_chunks = queue.Queue()  # Completed chunks ready for main thread
         self.chunks_to_unload = queue.Queue()  # Chunks to be unloaded
         self.thread_lock = threading.Lock()
+        # chunk_cache and explored_chunks are the only structures the workers
+        # really share with the main thread, and thread_lock never covered them.
+        # self.chunks stays main-thread-only and needs no lock at all.
+        self.cache_lock = threading.Lock()
         
         # Async mesh building queues
         self.mesh_build_queue = queue.PriorityQueue()  # Priority queue - closer chunks processed first
@@ -45,10 +93,11 @@ class ThreadedChunkManager:
         self.frustum = Frustum()
         self.enable_frustum_culling = True
 
-        # Start background thread
-        self.start_background_thread()
-        
-        print(f"ThreadedChunkManager initialized with render distance: {render_distance}")
+        # Start background threads
+        self.start_background_workers()
+
+        print(f"ThreadedChunkManager initialized with render distance: {render_distance} "
+              f"({self.WORKER_COUNT} worker threads)")
 
     
     def pregenerate_spawn_chunks(self, spawn_x, spawn_z):
@@ -115,30 +164,42 @@ class ThreadedChunkManager:
         if chunk is None:
             return False
 
-        self.explored_chunks.add((chunk_x, chunk_z))
-
         if not chunk.is_modified:
+            with self.cache_lock:
+                self.explored_chunks.add((chunk_x, chunk_z))
             return False
 
-        self.chunk_cache[(chunk_x, chunk_z)] = chunk.save_chunk_data()
+        data = chunk.save_chunk_data()
+        with self.cache_lock:
+            self.explored_chunks.add((chunk_x, chunk_z))
+            self.chunk_cache[(chunk_x, chunk_z)] = data
         return True
     
     def load_chunk_from_cache(self, chunk_x, chunk_z):
-        """Load chunk data from cache if available"""
-        if (chunk_x, chunk_z) in self.chunk_cache:
-            chunk_data = self.chunk_cache[(chunk_x, chunk_z)]
-            chunk = ModernChunk(chunk_x, chunk_z, self.renderer, chunk_data, chunk_manager=self)
-            return chunk
-        return None
-    
+        """Load chunk data from cache if available. Runs on a worker thread.
+
+        The lock covers the lookup only — rebuilding the chunk copies 64 KB and
+        several workers should be able to do that at the same time.
+        """
+        with self.cache_lock:
+            chunk_data = self.chunk_cache.get((chunk_x, chunk_z))
+
+        if chunk_data is None:
+            return None
+        return ModernChunk(chunk_x, chunk_z, self.renderer, chunk_data, chunk_manager=self)
+
     def is_chunk_explored(self, chunk_x, chunk_z):
         """Check if a chunk has been previously generated/explored"""
-        return (chunk_x, chunk_z) in self.explored_chunks
+        with self.cache_lock:
+            return (chunk_x, chunk_z) in self.explored_chunks
     
-    def start_background_thread(self):
-        """Start the background chunk loading thread"""
-        self.loading_thread = threading.Thread(target=self._chunk_worker, daemon=True)
-        self.loading_thread.start()
+    def start_background_workers(self):
+        """Start the background chunk loading and meshing threads"""
+        for index in range(self.WORKER_COUNT):
+            thread = threading.Thread(target=self._chunk_worker, daemon=True,
+                                      name=f"chunk-worker-{index}")
+            thread.start()
+            self.worker_threads.append(thread)
     
     def _chunk_worker(self):
         """Background thread worker for chunk loading and mesh building"""
@@ -161,7 +222,8 @@ class ThreadedChunkManager:
                         if chunk is None:
                             # Create new chunk if not in cache
                             chunk = ModernChunk(chunk_x, chunk_z, self.renderer, chunk_data=None, chunk_manager=self)
-                            self.explored_chunks.add((chunk_x, chunk_z))
+                            with self.cache_lock:
+                                self.explored_chunks.add((chunk_x, chunk_z))
                         
                         # Queue it for main thread integration
                         self.completed_chunks.put({
@@ -183,21 +245,28 @@ class ThreadedChunkManager:
                     priority, counter, mesh_request = priority_item
                     chunk_coords = mesh_request['coords']
                     chunk = mesh_request['chunk']
-                    
-                    # Build mesh in background thread. The neighbor arrays were
-                    # picked up on the main thread when the request was queued.
-                    vertices_array, indices_array = build_chunk_mesh_fast(
-                        chunk.blocks, chunk.chunk_x, chunk.chunk_z, mesh_request['neighbors'],
-                        scratch_vertices, scratch_indices
-                    )
-                    
-                    # Queue completed mesh for main thread
-                    self.completed_meshes.put({
-                        'coords': chunk_coords,
-                        'vertices': vertices_array,
-                        'indices': indices_array
-                    })
                     did_work = True
+
+                    # Skip work whose result would only be thrown away: the
+                    # chunk was unloaded while this request waited, or a newer
+                    # request for it has already been queued. Both reads can be
+                    # a moment stale, which costs at most one wasted build.
+                    if (chunk_coords in self.loaded_chunks
+                            and mesh_request['seq'] == chunk.mesh_seq):
+                        # Build mesh in background thread. The neighbor arrays were
+                        # picked up on the main thread when the request was queued.
+                        vertices_array, indices_array = build_chunk_mesh_fast(
+                            chunk.blocks, chunk.chunk_x, chunk.chunk_z, mesh_request['neighbors'],
+                            scratch_vertices, scratch_indices, mesh_request['lod']
+                        )
+
+                        # Queue completed mesh for main thread
+                        self.completed_meshes.put({
+                            'coords': chunk_coords,
+                            'seq': mesh_request['seq'],
+                            'vertices': vertices_array,
+                            'indices': indices_array
+                        })
                 except queue.Empty:
                     pass
 
@@ -243,6 +312,24 @@ class ThreadedChunkManager:
             )
         )
 
+    def chunk_lod(self, chunk_x, chunk_z):
+        """Detail level for this chunk, from its distance to the player's chunk.
+
+        Same circular metric the loader uses, so the LOD rings are concentric
+        with the render distance rather than square inside it.
+        """
+        if self.last_player_chunk is None:
+            return 0
+
+        dx = chunk_x - self.last_player_chunk[0]
+        dz = chunk_z - self.last_player_chunk[1]
+        distance_sq = dx * dx + dz * dz
+
+        for level, limit_sq in enumerate(LOD_DISTANCES_SQ):
+            if distance_sq <= limit_sq:
+                return level
+        return len(LOD_DISTANCES_SQ)
+
     def request_mesh(self, chunk_x, chunk_z, chunk=None):
         """Queue a background mesh build. No-op if the chunk is not loaded.
 
@@ -254,13 +341,26 @@ class ThreadedChunkManager:
             if chunk is None:
                 return
 
+        # The level this chunk was last *asked* for, not the one it is showing.
+        # update() compares against it to find chunks the player has walked into
+        # a different ring of, so it has to move when the request goes out or
+        # every frame would queue the same rebuild again.
+        chunk.lod = self.chunk_lod(chunk_x, chunk_z)
+
         self.mesh_request_counter += 1
+        # Stamp the chunk with this request's number. Workers finish out of
+        # order, so anything coming back with an older stamp has been
+        # superseded and must not overwrite the newer mesh.
+        chunk.mesh_seq = self.mesh_request_counter
+
         self.mesh_build_queue.put((
             self._calculate_chunk_priority(chunk_x, chunk_z),
             self.mesh_request_counter,
             {
                 'coords': (chunk_x, chunk_z),
                 'chunk': chunk,
+                'seq': self.mesh_request_counter,
+                'lod': chunk.lod,
                 'neighbors': self._neighbor_blocks(chunk_x, chunk_z),
             },
         ))
@@ -282,12 +382,13 @@ class ThreadedChunkManager:
                 priority, counter, mesh_request = priority_item
                 chunk_x, chunk_z = mesh_request['coords']
                 
-                # Calculate chunk distance in chunk coordinates
-                chunk_dx = abs(chunk_x - current_chunk_x)
-                chunk_dz = abs(chunk_z - current_chunk_z)
-                
-                # Only keep chunks within render distance
-                if chunk_dx <= self.render_distance and chunk_dz <= self.render_distance:
+                # The same circular metric get_chunks_in_range uses, squared so
+                # it needs no sqrt. This used to be a square, so it kept meshing
+                # corner chunks that were never going to be loaded.
+                chunk_dx = chunk_x - current_chunk_x
+                chunk_dz = chunk_z - current_chunk_z
+
+                if chunk_dx * chunk_dx + chunk_dz * chunk_dz <= self.render_distance ** 2:
                     # Recalculate priority with current player position
                     new_priority = self._calculate_chunk_priority(chunk_x, chunk_z)
                     new_queue.put((new_priority, counter, mesh_request))
@@ -337,6 +438,15 @@ class ThreadedChunkManager:
         """Get all chunk coordinates within render distance of center chunk"""
         return {(center_chunk_x + dx, center_chunk_z + dz)
                 for dx, dz in self._range_offsets()}
+
+    def _is_out_of_range(self, chunk_x, chunk_z):
+        """True if this chunk sits outside the current render distance."""
+        if self.last_player_chunk is None:
+            return False
+
+        dx = chunk_x - self.last_player_chunk[0]
+        dz = chunk_z - self.last_player_chunk[1]
+        return dx * dx + dz * dz > self.render_distance ** 2
     
     def request_chunk_load(self, chunk_x, chunk_z):
         """Request a chunk to be loaded in the background"""
@@ -364,13 +474,24 @@ class ThreadedChunkManager:
         """Process chunks that have been loaded in the background (call from main thread)"""
         processed = 0
         max_per_frame = 12  # Increased for faster updates when player moves quickly
+        deadline = time.perf_counter() + self.INTEGRATION_BUDGET
         
-        while processed < max_per_frame:
+        while processed < max_per_frame and time.perf_counter() < deadline:
             try:
                 result = self.completed_chunks.get_nowait()
                 if result['type'] == 'loaded':
                     chunk_x, chunk_z = result['coords']
                     chunk = result['chunk']
+
+                    # It may have left the render distance while it was being
+                    # generated. request_chunk_unload could not see it back then
+                    # because it was not in self.chunks yet, so the request was
+                    # dropped and the chunk stayed loaded until the next chunk
+                    # crossing happened to notice. Let it go here instead.
+                    if self._is_out_of_range(chunk_x, chunk_z):
+                        self.loaded_chunks.discard((chunk_x, chunk_z))
+                        processed += 1
+                        continue
 
                     # Add chunk to loaded chunks now that it's ready (or mesh is building)
                     with self.thread_lock:
@@ -392,7 +513,7 @@ class ThreadedChunkManager:
         
         # Process completed meshes and create VAOs (main thread only for OpenGL)
         mesh_processed = 0
-        while mesh_processed < max_per_frame:
+        while mesh_processed < max_per_frame and time.perf_counter() < deadline:
             try:
                 mesh_data = self.completed_meshes.get_nowait()
                 chunk_coords = mesh_data['coords']
@@ -402,7 +523,11 @@ class ThreadedChunkManager:
                 with self.thread_lock:
                     chunk = self.chunks.get(chunk_coords)
 
-                if chunk is not None:
+                # Drop results that a newer request has already superseded, and
+                # results whose chunk has gone. Workers do not finish in the
+                # order they were given work, so without the stamp an older
+                # mesh could land on top of a newer one.
+                if chunk is not None and mesh_data['seq'] == chunk.mesh_seq:
                     chunk.upload_mesh(mesh_data['vertices'], mesh_data['indices'])
 
                 # Counted either way, so a burst of stale results cannot blow
@@ -413,7 +538,7 @@ class ThreadedChunkManager:
         
         # Process unload requests
         unload_count = 0
-        while unload_count < max_per_frame:
+        while unload_count < max_per_frame and time.perf_counter() < deadline:
             try:
                 chunk_x, chunk_z = self.chunks_to_unload.get_nowait()
                 self.unload_chunk_immediate(chunk_x, chunk_z)
@@ -482,11 +607,24 @@ class ThreadedChunkManager:
                 if chunk_coords not in chunks_to_load:
                     if self.request_chunk_unload(chunk_coords[0], chunk_coords[1]):
                         unload_requests += 1
-            
-            if load_requests > 0 or unload_requests > 0:
+
+            # Chunks the player just walked into a different LOD ring of. Only
+            # the two ring boundaries move, so this is a few dozen rebuilds even
+            # at a large render distance, and they queue behind everything
+            # closer because the priority is distance.
+            # ponytail: no hysteresis — pacing back and forth across a boundary
+            # re-meshes the same ring. Add a one-chunk deadband if it shows up
+            # in a profile; the requests are already the lowest priority there is.
+            lod_requests = 0
+            for (chunk_x, chunk_z), chunk in self.chunks.items():
+                if self.chunk_lod(chunk_x, chunk_z) != chunk.lod:
+                    self.request_mesh(chunk_x, chunk_z, chunk)
+                    lod_requests += 1
+
+            if load_requests > 0 or unload_requests > 0 or lod_requests > 0:
                 print(f"Player moved to chunk {current_chunk}. "
                       f"Load requests: {load_requests}, Unload requests: {unload_requests}, "
-                      f"Total chunks: {len(self.chunks)}")
+                      f"LOD rebuilds: {lod_requests}, Total chunks: {len(self.chunks)}")
         
         return loaded > 0 or unloaded > 0  # Return True if any changes occurred
     
@@ -558,26 +696,37 @@ class ThreadedChunkManager:
             
             chunks_to_render = frustum_visible_chunks
 
-        # Render the remaining visible chunks (solid blocks first)
-        for chunk_coords, chunk in chunks_to_render:
-            chunk.render()
-            rendered_chunks += 1
-        
-        # Then render transparent blocks (water, leaves) with proper blending
-        for chunk_coords, chunk in chunks_to_render:
-            if hasattr(chunk, 'render_transparent'):
-                chunk.render_transparent()
-        
-        return rendered_chunks, total_chunks, frustum_culled
+        # Near to far, so the depth test can throw away fragments hidden behind
+        # a closer hill before the fragment shader ever runs on them.
+        player_x = self.player_position.x
+        player_z = self.player_position.z
+        chunks_to_render.sort(
+            key=lambda item: (item[0][0] * CHUNK_SIZE + HALF_CHUNK - player_x) ** 2
+                             + (item[0][1] * CHUNK_SIZE + HALF_CHUNK - player_z) ** 2)
+
+        # Straight to the VAO. This loop runs for every visible chunk on every
+        # frame, and the two wrapper calls it used to go through did nothing but
+        # forward. The transparent pass that followed it was a hasattr check
+        # against a method that does not exist; bring it back with the feature.
+        triangles = 0
+        for _, chunk in chunks_to_render:
+            vao = chunk.vao
+            if vao is not None:
+                vao.render()
+                rendered_chunks += 1
+                triangles += chunk.vertex_count
+
+        return rendered_chunks, total_chunks, frustum_culled, triangles // 3
 
     def cleanup(self):
         """Clean up all chunks and resources"""
         print("ThreadedChunkManager cleanup...")
         
-        # Stop background thread
+        # Stop background threads
         self.should_stop = True
-        if self.loading_thread and self.loading_thread.is_alive():
-            self.loading_thread.join(timeout=2.0)
+        for thread in self.worker_threads:
+            if thread.is_alive():
+                thread.join(timeout=2.0)
         
         # Clean up all chunks
         with self.thread_lock:
@@ -601,7 +750,12 @@ class ThreadedChunkManager:
     def get_chunk_info(self):
         """Get information about loaded chunks for debugging"""
         with self.thread_lock:
+            lod_counts = [0] * (len(LOD_DISTANCES) + 1)
+            for chunk in self.chunks.values():
+                lod_counts[chunk.lod] += 1
+
             return {
+                'lod_counts': lod_counts,
                 'loaded_chunks': len(self.chunks),
                 'pending_chunks': len(self.loaded_chunks) - len(self.chunks),
                 'cached_chunks': len(self.chunk_cache),

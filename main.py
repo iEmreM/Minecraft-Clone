@@ -301,12 +301,17 @@ class MinecraftModernGL:
 
         frustum_status = "FC:ON" if frustum_enabled else "FC:OFF"
 
+        # Chunks per detail level, then live triangles — the two numbers that
+        # say whether the LOD rings are actually doing anything.
+        lod_info = "/".join(str(count) for count in chunk_info['lod_counts'])
+        triangle_info = f"{getattr(self, 'triangles', 0) / 1000:.0f}k"
+
         if self.camera.flying:
             move_status = "FLY(SPRINT)" if self.camera.sprinting else "FLY"
         else:
             move_status = "SPRINT" if self.camera.sprinting else "WALK"
             
-        pg.display.set_caption(f'Minecraft ModernGL - FPS: {fps:.0f} | Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}) | {move_status} | Block: {selected_name} | Chunks: {culling_info} | RD: {self.render_distance} | {frustum_status}')
+        pg.display.set_caption(f'Minecraft ModernGL - FPS: {fps:.0f} | Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}) | {move_status} | Block: {selected_name} | Chunks: {culling_info} | LOD: {lod_info} | Tri: {triangle_info} | RD: {self.render_distance} | {frustum_status}')
     
     def render(self):
         """Render the game"""
@@ -327,13 +332,14 @@ class MinecraftModernGL:
         self.renderer.render_sky(view_matrix, elapsed_time)
         
         # Render chunks using chunk manager with frustum culling
-        rendered_chunks, total_chunks, frustum_culled = self.chunk_manager.render_chunks(
+        rendered_chunks, total_chunks, frustum_culled, triangles = self.chunk_manager.render_chunks(
             view_matrix, self.renderer.proj_matrix)
 
         # Store rendering stats for display
         self.rendered_chunks = rendered_chunks
         self.total_chunks = total_chunks
         self.frustum_culled = frustum_culled
+        self.triangles = triangles
         
         # Render water surface after chunks (for proper transparency)
         self.renderer.render_water_surface(view_matrix, self.camera.position)

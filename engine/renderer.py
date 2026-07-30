@@ -149,12 +149,7 @@ class ModernGLRenderer:
             ibo)
 
         return vao, vbo, ibo
-    
-    def render_vao(self, vao):
-        """Render a Vertex Array Object"""
-        if vao and self.chunk_program:
-            vao.render()
-    
+
     def create_texture_array(self, texture_path, tile_count_x=4, tile_count_y=4):
         """Create a texture array from an atlas"""
         try:
@@ -190,11 +185,19 @@ class ModernGLRenderer:
                 full_data
             )
             
-            # Set parameters
-            texture_array.filter = (mgl.NEAREST_MIPMAP_NEAREST, mgl.NEAREST)
+            # Nearest inside a mip level keeps the blocky look up close;
+            # blending *between* levels removes the band that used to sweep
+            # across the ground as you walk. Anisotropy is what actually
+            # matters at distance: a chunk seen at a grazing angle is minified
+            # far harder along one axis than the other, and an isotropic
+            # sampler has to pick the blurrier of the two for both, which is
+            # what turns distant ground into mush. The driver clamps the 16 to
+            # whatever it supports.
+            texture_array.filter = (mgl.NEAREST_MIPMAP_LINEAR, mgl.NEAREST)
             texture_array.repeat_x = True # Allow tiling
             texture_array.repeat_y = True
             texture_array.build_mipmaps()
+            texture_array.anisotropy = 16.0
             
             return texture_array
             

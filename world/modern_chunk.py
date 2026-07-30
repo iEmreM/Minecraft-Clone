@@ -32,6 +32,15 @@ class ModernChunk:
         self.vbo = None
         self.ibo = None
         self.vertex_count = 0
+        # Sequence number of the newest mesh build requested for this chunk.
+        # Several workers can be building this chunk at once and they do not
+        # finish in the order they started, so results that are not the newest
+        # request are dropped instead of overwriting it. See request_mesh.
+        self.mesh_seq = 0
+        # Detail level the newest mesh request for this chunk was made at. The
+        # chunk manager owns it — it re-requests a mesh when the player walks
+        # far enough for this to change. See ThreadedChunkManager.chunk_lod.
+        self.lod = 0
 
         # Persistence tracking
         self.is_generated = False
@@ -109,7 +118,17 @@ class ModernChunk:
         
         old_block = self.blocks[x, y, z]
         if old_block != block_type:
-            self.blocks[x, y, z] = block_type
+            # Copy on write. A worker thread may be reading this array inside
+            # build_chunk_mesh_fast right now, and that runs nogil, so the GIL
+            # is not holding it still — writing in place could be read half
+            # done. Swapping in a finished array instead means the worker sees
+            # either the old world or the new one, never a torn mix, and the
+            # rebuild queued below settles which one wins. One 64 KB copy per
+            # placed block, which is a few per second at most.
+            blocks = self.blocks.copy()
+            blocks[x, y, z] = block_type
+            self.blocks = blocks
+
             self.is_modified = True   # Mark chunk as modified by player
 
             # Request async mesh rebuild if chunk_manager is available
@@ -127,12 +146,3 @@ class ModernChunk:
                     self.chunk_manager.request_mesh(self.chunk_x, self.chunk_z - 1)
                 elif z == CHUNK_SIZE - 1:
                     self.chunk_manager.request_mesh(self.chunk_x, self.chunk_z + 1)
-    
-    def render(self):
-        """Render this chunk"""
-        # Don't build mesh here anymore - it's built asynchronously in ThreadedChunkManager
-        # Just render the VAO if it exists
-        if self.vao and self.vertex_count > 0:
-            self.renderer.render_vao(self.vao)
-    
-
