@@ -99,13 +99,29 @@ class ThreadedChunkManager:
         print(f"Pre-generation complete! Generated {generated_count} chunks with meshes ready.")
     
     def save_chunk_to_cache(self, chunk_x, chunk_z):
-        """Save chunk data to cache before unloading"""
-        if (chunk_x, chunk_z) in self.chunks:
-            chunk = self.chunks[(chunk_x, chunk_z)]
-            self.chunk_cache[(chunk_x, chunk_z)] = chunk.save_chunk_data()
-            self.explored_chunks.add((chunk_x, chunk_z))
-            return True
-        return False
+        """Keep an unloaded chunk's blocks, but only if the player changed them.
+
+        Terrain is a pure function of the chunk coordinates — fixed permutation
+        table, hash-based per-column jitter — so an untouched chunk regenerates
+        byte for byte in about 10 ms of worker time. Storing it instead meant
+        holding 64 KB forever for something reproducible, and since the cache is
+        never evicted, wandering around used to grow memory without bound.
+
+        ponytail: edited chunks still accumulate with no ceiling. That is player
+        work with nowhere else to live until chunks are written to disk; add a
+        bounded LRU together with that, not before.
+        """
+        chunk = self.chunks.get((chunk_x, chunk_z))
+        if chunk is None:
+            return False
+
+        self.explored_chunks.add((chunk_x, chunk_z))
+
+        if not chunk.is_modified:
+            return False
+
+        self.chunk_cache[(chunk_x, chunk_z)] = chunk.save_chunk_data()
+        return True
     
     def load_chunk_from_cache(self, chunk_x, chunk_z):
         """Load chunk data from cache if available"""
