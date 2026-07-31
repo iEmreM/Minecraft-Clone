@@ -99,6 +99,8 @@ class ThreadedChunkManager:
         self._draw_list_dirty = True
         self._cull_mask = None
 
+        self._update_fog()
+
         # Start background threads
         self.start_background_workers()
 
@@ -768,10 +770,21 @@ class ThreadedChunkManager:
         
         print(f"Cleaned up {chunk_count} chunks")
     
+    def _update_fog(self):
+        """Hand the renderer the radius the world is actually loaded to.
+
+        It picks the fog start and end from that. Every render distance change
+        routes through here (constructor and set_render_distance), so the shaders
+        can never disagree with how far the world goes.
+        """
+        if self.renderer:
+            self.renderer.set_fog_distance(self.render_distance * CHUNK_SIZE)
+
     def set_render_distance(self, new_distance):
         """Change the render distance and trigger chunk update"""
         if new_distance != self.render_distance:
             self.render_distance = new_distance
+            self._update_fog()
             # Force update on next frame
             self.last_player_chunk = None
             print(f"Render distance changed to: {new_distance}")

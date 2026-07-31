@@ -5,8 +5,11 @@ in float shading;
 in vec3 frag_world_pos;
 
 uniform sampler2DArray u_texture_0;
-uniform vec3 bg_color;
 uniform float water_line; // Water level for underwater effects
+uniform vec2 fog_range;   // (start, fully opaque) in world units, render distance driven
+uniform vec3 cam_pos;     // Eye position, for radial (spherical) fog
+uniform vec3 sky_horizon; // Both fed from the renderer and used by sky.frag too:
+uniform vec3 sky_zenith;  // fog resolves to the sky's own colour in that direction
 
 out vec4 fragColor;
 
@@ -35,18 +38,33 @@ void main() {
         tex_color *= vec3(0.35, 0.55, 0.85); // Lighter underwater (was 0.0, 0.3, 1.0)
     }
     
-    // OPTIMIZATION: Simplified fog calculation (linear instead of exponential)
-    // Increased fog density for better atmospheric depth
-    float fog_dist = gl_FragCoord.z / gl_FragCoord.w;
-    float fog_factor = fog_dist * 0.0012; // Increased from 0.0008 for more visible fog
-    fog_factor = clamp(fog_factor, 0.0, 1.0);
-    
-    // Mix with background color for atmospheric depth
-    tex_color = mix(tex_color, bg_color, fog_factor);
-    
-    // Minimal saturation boost for color vibrancy (very cheap: 1 dot + 1 mix)
+    // Saturation boost happens BEFORE the fog mix: after it, it also pushed the
+    // fog colour away from the sky's, which is what made distant terrain read as
+    // a brighter silhouette than the sky behind it.
+    // (very cheap: 1 dot + 1 mix)
     float gray = dot(tex_color, vec3(0.299, 0.587, 0.114));
     tex_color = mix(vec3(gray), tex_color, 1.08); // Slight saturation boost
-    
+
+    // Fog is tied to the render distance (fog_range), so chunks fade into the sky
+    // instead of popping in at the edge. The squared ramp keeps everything up to
+    // fog_range.x clear and piles the haze up over the last stretch.
+    //
+    // Distance is radial (from the eye), like Minecraft's spherical fog — NOT
+    // gl_FragCoord.z/w, which is depth along the view axis: that made the fog on
+    // a fixed piece of terrain thin out as you turned and it slid to the edge of
+    // the screen, because its z-depth shrinks by cos(angle off centre).
+    vec3 to_frag = frag_world_pos - cam_pos;
+    float fog_dist = length(to_frag);
+    float fog_factor = clamp((fog_dist - fog_range.x) / (fog_range.y - fog_range.x),
+                             0.0, 1.0);
+    fog_factor *= fog_factor;
+
+    // Fog colour is the sky colour along this same ray — the identical gradient
+    // sky.frag draws, from the identical two uniforms. A single flat fog colour
+    // could only match the sky at one height; everywhere else the horizon showed
+    // a seam between the terrain and the sky just above it.
+    float gradient = smoothstep(-0.2, 0.5, max(0.0, to_frag.y / fog_dist));
+    tex_color = mix(tex_color, mix(sky_horizon, sky_zenith, gradient), fog_factor);
+
     fragColor = vec4(tex_color, 1.0);
 }

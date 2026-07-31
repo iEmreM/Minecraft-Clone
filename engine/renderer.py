@@ -14,8 +14,15 @@ class ModernGLRenderer:
     NEAR_PLANE = 0.1
     FAR_PLANE = 1000.0
 
-    # Sky horizon; the chunk shader fades distant fog to this.
-    BG_COLOR = (0.6, 0.8, 0.95)
+    # The sky gradient, and the only copy of it. sky.frag draws it, and chunk /
+    # water fog resolve to the same gradient along the view ray, so distant
+    # terrain dissolves into the sky instead of standing out against it.
+    BG_COLOR = (0.6, 0.8, 0.95)      # horizon
+    SKY_ZENITH = (0.0, 0.4, 0.8)
+
+    # Fog starts this far into the render distance and is opaque at the end of it.
+    FOG_START_FRACTION = 0.65
+    FOG_END_FRACTION = 0.9           # of render_distance * CHUNK_SIZE
 
     def __init__(self, width=800, height=600):
         # Initialize Pygame
@@ -63,8 +70,10 @@ class ModernGLRenderer:
         self.sky_renderer = SkyRenderer(self.ctx, self.shader_manager)
         
         self.bg_color = glm.vec3(*self.BG_COLOR)
+        self.sky_zenith = glm.vec3(*self.SKY_ZENITH)
         self.proj_matrix = self._make_projection(width, height)
         self._upload_static_uniforms()
+        self.set_fog_distance(96.0)  # replaced by the chunk manager's render distance
 
         # Initialize crosshair and block outline
         self._init_crosshair()
@@ -86,10 +95,17 @@ class ModernGLRenderer:
     def _upload_static_uniforms(self):
         """Write the chunk uniforms that only change on a resize.
 
-        The fog colour, the water line and the projection are all fixed between
+        The sky gradient, the water line and the projection are all fixed between
         resizes; they used to be re-uploaded on every frame, and the water line
         came with a module import each time on top of that.
         """
+        # The sky gradient goes to every program that has to agree on it.
+        for name in ('chunk', 'water', 'sky'):
+            program = self.shader_manager.get_program(name)
+            if program and 'sky_horizon' in program:
+                program['sky_horizon'].write(self.bg_color)
+                program['sky_zenith'].write(self.sky_zenith)
+
         if self.water_surface:
             self.water_surface.upload_static_uniforms()
 
@@ -97,8 +113,25 @@ class ModernGLRenderer:
             return
 
         self.chunk_program['m_proj'].write(self.proj_matrix.to_bytes())
-        self.chunk_program['bg_color'].write(self.bg_color)
         self.chunk_program['water_line'] = float(WATER_LINE)
+
+    def set_fog_distance(self, view_radius):
+        """Fit the fog to how far the world actually loads.
+
+        `view_radius` is render_distance * CHUNK_SIZE, straight from the chunk
+        manager. Fog is opaque at FOG_END_FRACTION of it — before the load edge,
+        so terrain never pops in — and starts at FOG_START_FRACTION of that, so
+        everything nearer stays clear. Water reads the same range and sizes its
+        plane from it, so land and sea cannot disagree about where the world ends.
+        """
+        self.fog_end = max(float(view_radius), 1.0) * self.FOG_END_FRACTION
+        self.fog_start = self.fog_end * self.FOG_START_FRACTION
+        fog_range = glm.vec2(self.fog_start, self.fog_end)
+
+        if self.chunk_program:
+            self.chunk_program['fog_range'].write(fog_range)
+        if self.water_surface:
+            self.water_surface.set_fog(fog_range, self.fog_end)
 
     def resize(self, width, height):
         """Handle window resize"""
@@ -118,7 +151,7 @@ class ModernGLRenderer:
             self.chunk_program['m_view'].write(view_matrix.to_bytes())
     
     def update_matrices(self, view_matrix, model_matrix=None):
-        """Upload the one chunk uniform that changes every frame.
+        """Upload the two chunk uniforms that change every frame.
 
         Everything else lives in _upload_static_uniforms.
         """
@@ -128,6 +161,10 @@ class ModernGLRenderer:
         # OPTIMIZATION: m_model removed - shader compiler optimizes it out since unused
         # The vertex shader doesn't use m_model (always identity), so GLSL compiler removes it
         self.chunk_program['m_view'].write(view_matrix.to_bytes())
+        # Eye position for radial fog. Taken from the view matrix rather than
+        # added to this method's signature, so no caller can forget to pass it.
+        self.cam_pos = glm.vec3(glm.inverse(view_matrix)[3])
+        self.chunk_program['cam_pos'].write(self.cam_pos)
     
     def create_vao(self, vertices, indices=None):
         """Create a Vertex Array Object from vertex data.

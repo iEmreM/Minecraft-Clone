@@ -12,41 +12,30 @@ class WaterSurface:
     def __init__(self, renderer):
         self.renderer = renderer
         self.ctx = renderer.ctx
-        # Large water area like ornek2: 5 * CHUNK_SIZE * WORLD_W
-        # Using our chunk size (16) and a large world multiplier
-        self.water_area = 5 * 16 * 50  # 4000 units - covers huge area
-        
+        # Side length of the plane, in world units. Set from the fog distance by
+        # set_fog(); this is just a value to hold until the renderer calls it.
+        self.water_area = 200.0
+
         # Create water surface mesh
         self.vao = self._create_water_mesh()
-        
+
     def _create_water_mesh(self):
-        """Create a large quad mesh for the water surface"""
-        # Get water shader program
+        """Unit quad in XZ; the vertex shader scales and centres it.
+
+        The UV column the mesh used to carry is gone — UVs are now derived from
+        world position in the shader so the texture doesn't swim as the plane
+        follows the player.
+        """
         water_program = self.renderer.shader_manager.get_program('water')
-        
-        # Create a large quad at Y = WATER_LINE
-        size = self.water_area
-        half_size = size // 2
-        
-        # Vertices for a quad like ornek2 (u, v, x, y, z)
+
         vertices = np.array([
-            # Triangle 1
-            [0.0, 0.0, 0.0, 0.0, 0.0],  # Bottom-left
-            [1.0, 1.0, 1.0, 0.0, 1.0],  # Top-right  
-            [1.0, 0.0, 1.0, 0.0, 0.0],  # Bottom-right
-            
-            # Triangle 2
-            [0.0, 0.0, 0.0, 0.0, 0.0],  # Bottom-left
-            [0.0, 1.0, 0.0, 0.0, 1.0],  # Top-left
-            [1.0, 1.0, 1.0, 0.0, 1.0],  # Top-right
+            [0.0, 0.0, 0.0], [1.0, 0.0, 1.0], [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0],
         ], dtype=np.float32)
-        
-        # Create VBO
+
         vbo = self.ctx.buffer(vertices.tobytes())
-        
-        # Create VAO like ornek2 (tex_coord first, then position)
-        vao = self.ctx.vertex_array(water_program, [(vbo, '2f 3f', 'in_tex_coord', 'in_position')])
-        
+        vao = self.ctx.vertex_array(water_program, [(vbo, '3f', 'in_position')])
+
         print("Water surface mesh created successfully")
         return vao
     
@@ -65,6 +54,21 @@ class WaterSurface:
         water_program['m_proj'].write(self.renderer.proj_matrix.to_bytes())
         water_program['water_area'] = self.water_area
         water_program['water_line'] = float(WATER_LINE)
+
+    def set_fog(self, fog_range, fog_end):
+        """Match the terrain's fog, and shrink the plane to fit inside it.
+
+        2.1 * fog_end across, centred on the player, puts the nearest rim just
+        past the distance where fog is already opaque — so the edge of the water
+        is never visible, at any render distance.
+        """
+        water_program = self.renderer.shader_manager.get_program('water')
+        if not water_program:
+            return
+
+        self.water_area = 2.1 * fog_end
+        water_program['water_area'] = self.water_area
+        water_program['fog_range'].write(fog_range)
 
     def render(self, view_matrix, proj_matrix, camera_pos):
         """Render the water surface with transparency"""
@@ -88,9 +92,11 @@ class WaterSurface:
         # Bind water texture
         self.renderer.bind_water_texture()
         
-        # The view matrix is the only one that moves; the rest live in
-        # upload_static_uniforms.
+        # The view matrix and the eye are the only things that move; the rest
+        # live in upload_static_uniforms / set_fog.
         water_program['m_view'].write(view_matrix.to_bytes())
+        water_program['cam_pos'].write(glm.vec3(camera_pos))
+        water_program['water_center'].write(glm.vec2(camera_pos.x, camera_pos.z))
 
         # Render the water surface
         self.vao.render()

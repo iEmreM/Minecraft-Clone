@@ -7,6 +7,8 @@ uniform vec3 u_view_pos; // Not stricly needed if just using gl_FragCoord or UV
 uniform float u_time;
 uniform vec2 u_resolution;
 uniform mat4 m_inv_pv; // Inverse Projection * View matrix to rebuild ray
+uniform vec3 sky_horizon;
+uniform vec3 sky_zenith;
 
 // Noise functions (Simplex 2D)
 vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -52,12 +54,11 @@ void main() {
     // Map ray_dir.y (-1 to 1) to colors
     // 0.0 = Horizon, 1.0 = Zenith
     
-    vec3 color_zenith = vec3(0.0, 0.4, 0.8); // Deep Blue
-    vec3 color_horizon = vec3(0.6, 0.8, 0.95); // Misty/White Blue
-    
-    // Background mix
+    // Background mix. sky_horizon / sky_zenith come from the renderer, and the
+    // chunk and water shaders fog to this exact gradient — the three must agree
+    // or distant terrain shows up as a silhouette against the sky.
     float gradient = smoothstep(-0.2, 0.5, max(0.0, ray_dir.y));
-    vec3 sky_color = mix(color_horizon, color_zenith, gradient);
+    vec3 sky_color = mix(sky_horizon, sky_zenith, gradient);
     
     // 3. Clouds (Only above horizon)
     if (ray_dir.y > 0.05) {
