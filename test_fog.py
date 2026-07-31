@@ -6,8 +6,9 @@ Guards three things that fail as "looks wrong" rather than as an exception:
     of terrain is. With the old gl_FragCoord.z/w depth fog it thinned out by
     cos(angle off centre) as terrain slid to the edge of the screen.
   * fog is tied to render distance — clear up close, opaque by fog_end.
-  * fully fogged terrain is *exactly* the sky colour along the same ray, so the
-    horizon has no seam and distant land is not a brighter silhouette.
+  * fully fogged terrain is *exactly* the sky along the same ray — the whole
+    sky, clouds and sun included, not just the gradient. Otherwise a fogged
+    mountain shows up as a sky-blue hole cutting through a cloud.
 
 Run: python test_fog.py
 """
@@ -16,6 +17,8 @@ import math
 import numpy as np
 import moderngl
 import glm
+
+from engine.shader_manager import load_source
 
 WIDTH = HEIGHT = 256
 FOV = 65.0
@@ -26,18 +29,18 @@ SKY_ZENITH = (0.0, 0.4, 0.8)
 
 
 def _load(ctx, name):
-    with open(f'shaders/{name}.vert') as f:
-        vert = f.read()
-    with open(f'shaders/{name}.frag') as f:
-        frag = f.read()
-    return ctx.program(vertex_shader=vert, fragment_shader=frag)
+    # Same loader the game uses, so the #include of sky_common.glsl resolves.
+    return ctx.program(vertex_shader=load_source(f'shaders/{name}.vert'),
+                       fragment_shader=load_source(f'shaders/{name}.frag'))
 
 
-def _camera(yaw_deg):
+def _camera(yaw_deg, look_dir=None):
+    """Camera at the origin, looking along yaw — or straight down `look_dir`."""
     eye = glm.vec3(0.0, 0.0, 0.0)
-    yaw = math.radians(yaw_deg)
-    view = glm.lookAt(eye, eye + glm.vec3(math.sin(yaw), 0.0, -math.cos(yaw)),
-                      glm.vec3(0, 1, 0))
+    if look_dir is None:
+        yaw = math.radians(yaw_deg)
+        look_dir = glm.vec3(math.sin(yaw), 0.0, -math.cos(yaw))
+    view = glm.lookAt(eye, eye + look_dir, glm.vec3(0, 1, 0))
     proj = glm.perspective(glm.radians(FOV), 1.0, 0.1, 1000.0)
     return eye, view, proj
 
@@ -48,9 +51,38 @@ def _screen_pos(proj, view, world):
             int((clip.y / clip.w * 0.5 + 0.5) * HEIGHT))
 
 
-def _read(fbo, px, py):
+def _image(fbo):
     data = np.frombuffer(fbo.read(components=3, dtype='f4'), dtype='f4')
-    return data.reshape(HEIGHT, WIDTH, 3)[py, px]
+    return data.reshape(HEIGHT, WIDTH, 3)
+
+
+def _read(fbo, px, py):
+    return _image(fbo)[py, px]
+
+
+def _draw_terrain(ctx, prog, fbo, verts, yaw_deg=0.0, look_dir=None):
+    """Draw `verts` with the real chunk shader. Returns (eye, view, proj)."""
+    vbo = ctx.buffer(np.array(verts, dtype='f4').tobytes())
+    vao = ctx.vertex_array(prog, [(vbo, '3f 3f 1f',
+                                   'in_position', 'in_tex_coord', 'in_shading')])
+
+    eye, view, proj = _camera(yaw_deg, look_dir)
+    prog['m_proj'].write(proj.to_bytes())
+    prog['m_view'].write(view.to_bytes())
+    prog['cam_pos'].write(eye)
+    prog['sky_horizon'].write(glm.vec3(*SKY_HORIZON))
+    prog['sky_zenith'].write(glm.vec3(*SKY_ZENITH))
+    prog['u_time'] = 0.0                # the sky's clock: clouds must not drift
+    prog['water_line'] = -1000.0        # keep the underwater tint out of the way
+    prog['fog_range'].write(glm.vec2(FOG_START, FOG_END))
+
+    fbo.use()
+    fbo.clear(0.0, 0.0, 0.0, 1.0)
+    vao.render()
+
+    vbo.release()
+    vao.release()
+    return eye, view, proj
 
 
 def _render_probe(ctx, prog, fbo, world, yaw_deg):
@@ -67,38 +99,41 @@ def _render_probe(ctx, prog, fbo, world, yaw_deg):
                    (-half, -half), (half, half), (-half, half)):
         # position, uv (layer 0), shading 1.0 (unshaded, so only fog moves it)
         verts += [x + dx, y + dy, z, 0.5, 0.5, 0.0, 1.0]
-    vbo = ctx.buffer(np.array(verts, dtype='f4').tobytes())
-    vao = ctx.vertex_array(prog, [(vbo, '3f 3f 1f',
-                                   'in_position', 'in_tex_coord', 'in_shading')])
 
-    eye, view, proj = _camera(yaw_deg)
-    prog['m_proj'].write(proj.to_bytes())
-    prog['m_view'].write(view.to_bytes())
-    prog['cam_pos'].write(eye)
-    prog['sky_horizon'].write(glm.vec3(*SKY_HORIZON))
-    prog['sky_zenith'].write(glm.vec3(*SKY_ZENITH))
-    prog['water_line'] = -1000.0        # keep the underwater tint out of the way
-    prog['fog_range'].write(glm.vec2(FOG_START, FOG_END))
-
-    fbo.use()
-    fbo.clear(0.0, 0.0, 0.0, 1.0)
-    vao.render()
-
+    _, view, proj = _draw_terrain(ctx, prog, fbo, verts, yaw_deg)
     px, py = _screen_pos(proj, view, world)
-    pixel = _read(fbo, px, py)
-
-    vbo.release()
-    vao.release()
-    return pixel, (px, py)
+    return _read(fbo, px, py), (px, py)
 
 
-def _render_sky(ctx, prog, fbo, yaw_deg):
+def _render_fogged_wall(ctx, prog, fbo, look_dir):
+    """Fill the frame with terrain that is past fog_end, and return the image.
+
+    A flat wall square to the view, so every one of its fragments is beyond the
+    fog distance: the whole frame is pure fog colour and must come out as the
+    sky in that direction, cloud for cloud.
+    """
+    d = glm.normalize(look_dir)
+    right = glm.normalize(glm.cross(d, glm.vec3(0, 1, 0)))
+    up = glm.cross(right, d)
+    centre = d * (FOG_END * 1.5)
+    half = FOG_END * 1.5 * 1.2          # wider than the 65° frame at that range
+
+    verts = []
+    for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, -1), (1, 1), (-1, 1)):
+        p = centre + right * (sx * half) + up * (sy * half)
+        verts += [p.x, p.y, p.z, 0.5, 0.5, 0.0, 1.0]
+
+    _draw_terrain(ctx, prog, fbo, verts, look_dir=d)
+    return _image(fbo)
+
+
+def _render_sky(ctx, prog, fbo, yaw_deg, look_dir=None):
     """Full-screen sky, same camera, so a pixel can be compared against fog."""
     verts = np.array([-1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1, 0], dtype='f4')
     vbo = ctx.buffer(verts.tobytes())
     vao = ctx.vertex_array(prog, [(vbo, '3f', 'in_position')])
 
-    _, view, proj = _camera(yaw_deg)
+    _, view, proj = _camera(yaw_deg, look_dir)
     prog['m_inv_pv'].write(glm.inverse(proj * glm.mat4(glm.mat3(view))).to_bytes())
     prog['u_time'] = 0.0
     prog['sky_horizon'].write(glm.vec3(*SKY_HORIZON))
@@ -144,6 +179,35 @@ def main():
           f'sky {tuple(round(float(c), 3) for c in sky_pixel)}  (max delta {delta:.4f})')
     assert delta < 0.01, 'fully fogged terrain does not match the sky — horizon seam'
 
+    # --- ...and the whole sky, not just the gradient: clouds and sun ---
+    # A frame filled with fully fogged terrain, aimed once at open sky and once
+    # straight at the sun, against the sky drawn from the same camera. Every
+    # pixel has to match, or a fogged mountain reads as a sky-coloured hole
+    # punched through the cloud (or the sun) sitting behind it.
+    # (2, 1, -2) is 86° off the sun, so its bright pixels are cloud and nothing
+    # else; the sun's own direction is the one from sky_common.glsl.
+    for label, look in (('cloud', glm.vec3(2.0, 1.0, -2.0)),
+                        ('sun', glm.vec3(0.2, 0.8, 0.5))):
+        fogged = _render_fogged_wall(ctx, chunk_prog, fbo, look)
+        _render_sky(ctx, sky_prog, fbo, 0.0, look_dir=look)
+        sky_img = _image(fbo)
+
+        # The gradient alone can never push red past the horizon's 0.6, so this
+        # is what says there really is a cloud / the sun in frame and the
+        # comparison below is not passing on empty sky.
+        assert sky_img[..., 0].max() > 0.75, \
+            f'no {label} in frame — the match below would prove nothing'
+
+        diff = np.abs(fogged - sky_img).max(axis=2)
+        off = int((diff > 0.01).sum())
+        print(f'  {label} in frame: {off} of {diff.size} pixels differ from the '
+              f'sky (worst {diff.max():.4f})')
+        # A stray pixel may straddle a hard cloud edge, where the sky's ray and
+        # the terrain's ray round to opposite sides of the step (3 of the frame's
+        # ~2400 edge pixels here). Fog that went back to the plain gradient would
+        # miss every cloud pixel instead — thousands.
+        assert off < 100, f'fogged terrain does not match the sky at the {label}'
+
     # --- rotation invariance: same terrain, centre of view vs edge of view ---
     dist = FOG_END * 0.85
     centre, at_centre = _render_probe(ctx, chunk_prog, fbo, (0.0, 0.0, -dist), 0.0)
@@ -177,10 +241,11 @@ def main():
     assert ramp[-1][1] > 0.99, 'fog must be opaque at fog_end, or chunks pop in'
     assert all(b[1] >= a[1] for a, b in zip(ramp, ramp[1:])), 'ramp must be monotonic'
 
-    # --- water shares the curve and the sky colours ---
-    for name in ('fog_range', 'sky_horizon', 'sky_zenith'):
+    # --- water shares the curve and the same sky function ---
+    for name in ('fog_range', 'sky_horizon', 'sky_zenith', 'u_time'):
         assert name in water_prog, f'water lost {name}: it will fade differently'
-    print('OK: fog is radial, ramps with render distance, and resolves to the sky')
+    print('OK: fog is radial, ramps with render distance, and resolves to the '
+          'sky — clouds and sun included')
 
 
 if __name__ == '__main__':

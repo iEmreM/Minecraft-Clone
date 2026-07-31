@@ -314,7 +314,17 @@ class ModernGLRenderer:
                 water_program['u_texture_0'] = 1
     
     def render_sky(self, view_matrix, time):
-        """Render the sky background"""
+        """Render the sky background, and give the fog the same clock.
+
+        chunk/water fog resolves to sky_color(), whose clouds drift with u_time.
+        Feeding all three from this one call is what stops the clouds inside the
+        fog from sliding away from the ones drawn in the sky.
+        """
+        for name in ('chunk', 'water'):
+            program = self.shader_manager.get_program(name)
+            if program and 'u_time' in program:
+                program['u_time'] = time
+
         if hasattr(self, 'sky_renderer'):
             self.sky_renderer.render(view_matrix, self.proj_matrix, time)
             

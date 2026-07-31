@@ -1,5 +1,20 @@
+import re
 import moderngl as mgl
 from pathlib import Path
+
+
+def load_source(path):
+    """Read a shader, resolving `#include "file"` against its own directory.
+
+    GLSL 330 has no #include, so it is resolved here. It exists for one file:
+    sky_common.glsl, which sky.frag draws the sky with and chunk.frag /
+    water.frag fog to — copies of that in three shaders is exactly how the fog
+    and the sky drift apart.
+    """
+    path = Path(path)
+    source = path.read_text()
+    return re.sub(r'#include\s+"(.+?)"',
+                  lambda m: path.with_name(m.group(1)).read_text(), source)
 
 
 class ShaderManager:
@@ -10,16 +25,10 @@ class ShaderManager:
     def load_shader(self, name, vertex_path, fragment_path):
         """Load and compile a shader program"""
         try:
-            # Read shader source files
-            with open(vertex_path, 'r') as f:
-                vertex_source = f.read()
-            with open(fragment_path, 'r') as f:
-                fragment_source = f.read()
-            
             # Create and compile shader program
             program = self.ctx.program(
-                vertex_shader=vertex_source,
-                fragment_shader=fragment_source
+                vertex_shader=load_source(vertex_path),
+                fragment_shader=load_source(fragment_path)
             )
             
             self.programs[name] = program

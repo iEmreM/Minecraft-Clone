@@ -1,4 +1,5 @@
 #version 330 core
+#include "sky_common.glsl"
 
 in vec3 uv;
 in float shading;
@@ -8,8 +9,6 @@ uniform sampler2DArray u_texture_0;
 uniform float water_line; // Water level for underwater effects
 uniform vec2 fog_range;   // (start, fully opaque) in world units, render distance driven
 uniform vec3 cam_pos;     // Eye position, for radial (spherical) fog
-uniform vec3 sky_horizon; // Both fed from the renderer and used by sky.frag too:
-uniform vec3 sky_zenith;  // fog resolves to the sky's own colour in that direction
 
 out vec4 fragColor;
 
@@ -59,12 +58,14 @@ void main() {
                              0.0, 1.0);
     fog_factor *= fog_factor;
 
-    // Fog colour is the sky colour along this same ray — the identical gradient
-    // sky.frag draws, from the identical two uniforms. A single flat fog colour
-    // could only match the sky at one height; everywhere else the horizon showed
-    // a seam between the terrain and the sky just above it.
-    float gradient = smoothstep(-0.2, 0.5, max(0.0, to_frag.y / fog_dist));
-    tex_color = mix(tex_color, mix(sky_horizon, sky_zenith, gradient), fog_factor);
+    // Fog colour is the sky colour along this same ray, from the same function
+    // sky.frag draws with — gradient, clouds and sun. A flat colour could only
+    // match the sky at one height; the gradient alone could only match it where
+    // there is no cloud, so a half-fogged mountain used to cut a cloud in half.
+    // Skipped entirely below fog_range.x, which is most of the screen.
+    if (fog_factor > 0.0) {
+        tex_color = mix(tex_color, sky_color(to_frag / fog_dist), fog_factor);
+    }
 
     fragColor = vec4(tex_color, 1.0);
 }
