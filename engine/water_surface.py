@@ -50,11 +50,27 @@ class WaterSurface:
         print("Water surface mesh created successfully")
         return vao
     
+    def upload_static_uniforms(self):
+        """Write the water uniforms that only change on a resize.
+
+        The projection, the plane's size and its height are fixed between
+        resizes. They used to be re-sent every frame, and `to_bytes()` on the
+        projection allocated a fresh buffer each time — the same thing the
+        chunk program was already fixed for.
+        """
+        water_program = self.renderer.shader_manager.get_program('water')
+        if not water_program:
+            return
+
+        water_program['m_proj'].write(self.renderer.proj_matrix.to_bytes())
+        water_program['water_area'] = self.water_area
+        water_program['water_line'] = float(WATER_LINE)
+
     def render(self, view_matrix, proj_matrix, camera_pos):
         """Render the water surface with transparency"""
         # Get water shader program
         water_program = self.renderer.shader_manager.get_program('water')
-        
+
         # Enable blending for transparency
         self.ctx.enable(mgl.BLEND)
         self.ctx.blend_func = mgl.SRC_ALPHA, mgl.ONE_MINUS_SRC_ALPHA
@@ -72,12 +88,10 @@ class WaterSurface:
         # Bind water texture
         self.renderer.bind_water_texture()
         
-        # Set uniforms like ornek2
+        # The view matrix is the only one that moves; the rest live in
+        # upload_static_uniforms.
         water_program['m_view'].write(view_matrix.to_bytes())
-        water_program['m_proj'].write(proj_matrix.to_bytes())
-        water_program['water_area'] = self.water_area  # Use our calculated water area
-        water_program['water_line'] = float(WATER_LINE)
-        
+
         # Render the water surface
         self.vao.render()
         

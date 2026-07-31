@@ -1,6 +1,7 @@
 import math
 import os
 import glm
+import numpy as np
 import threading
 import queue
 import time
@@ -89,9 +90,14 @@ class ThreadedChunkManager:
         self.player_position = glm.vec3(0, 0, 0)  # Track player position for priority calculation
         self.mesh_request_counter = 0  # Counter for tiebreaker in priority queue
         
-        # Frustum culling
+        # Frustum culling. The draw list and the coordinate arrays behind it are
+        # rebuilt when the set of loaded chunks changes, not per frame — see
+        # _refresh_draw_list.
         self.frustum = Frustum()
         self.enable_frustum_culling = True
+        self._draw_chunks = []
+        self._draw_list_dirty = True
+        self._cull_mask = None
 
         # Start background threads
         self.start_background_workers()
@@ -124,6 +130,7 @@ class ThreadedChunkManager:
                 chunk = ModernChunk(x, z, self.renderer, chunk_data=None, chunk_manager=self)
 
                 self.chunks[(x, z)] = chunk
+                self._draw_list_dirty = True
                 self.loaded_chunks.add((x, z))
                 self.explored_chunks.add((x, z))
                 generated.append((x, z))
@@ -496,6 +503,7 @@ class ThreadedChunkManager:
                     # Add chunk to loaded chunks now that it's ready (or mesh is building)
                     with self.thread_lock:
                         self.chunks[(chunk_x, chunk_z)] = chunk
+                    self._draw_list_dirty = True
 
                     self.request_mesh(chunk_x, chunk_z, chunk)
 
@@ -562,6 +570,7 @@ class ThreadedChunkManager:
             # Remove from dictionaries
             with self.thread_lock:
                 del self.chunks[(chunk_x, chunk_z)]
+            self._draw_list_dirty = True
             self.loaded_chunks.discard((chunk_x, chunk_z))
             return True
         return False
@@ -671,45 +680,64 @@ class ThreadedChunkManager:
 
         return False
     
+    def _refresh_draw_list(self):
+        """Rebuild the flat chunk list and the coordinate arrays culling runs on.
+
+        Only the *set* of loaded chunks feeds these, so this runs when a chunk
+        arrives or leaves rather than every frame. Rebuilding it per frame was
+        how the old draw path started, and `list(self.chunks.items())` alone
+        was 0.44 ms a frame at render distance 24.
+        """
+        with self.thread_lock:
+            items = list(self.chunks.items())
+
+        self._draw_chunks = [chunk for _, chunk in items]
+        coords = (np.array([key for key, _ in items], dtype=np.float64)
+                  if items else np.zeros((0, 2)))
+
+        self._cull_min_x = coords[:, 0] * CHUNK_SIZE
+        self._cull_max_x = self._cull_min_x + CHUNK_SIZE
+        self._cull_min_z = coords[:, 1] * CHUNK_SIZE
+        self._cull_max_z = self._cull_min_z + CHUNK_SIZE
+        # Chunk centres, for the near-to-far sort.
+        self._cull_mid_x = self._cull_min_x + HALF_CHUNK
+        self._cull_mid_z = self._cull_min_z + HALF_CHUNK
+        self._cull_mask = None
+        self._draw_list_dirty = False
+
     def render_chunks(self, view_matrix=None, proj_matrix=None):
         """Render all loaded chunks with optional frustum culling"""
-        with self.thread_lock:
-            chunks_to_render = list(self.chunks.items())
+        if self._draw_list_dirty:
+            self._refresh_draw_list()
 
-        total_chunks = len(chunks_to_render)
+        chunks = self._draw_chunks
+        total_chunks = len(chunks)
         frustum_culled = 0
-        rendered_chunks = 0
 
-        # Apply frustum culling if enabled
         if self.enable_frustum_culling and view_matrix is not None and proj_matrix is not None:
-            view_proj_matrix = proj_matrix * view_matrix
-            self.frustum.extract_planes(view_proj_matrix)
-            
-            # Filter chunks using frustum culling
-            frustum_visible_chunks = []
-            for chunk_coords, chunk in chunks_to_render:
-                chunk_x, chunk_z = chunk_coords
-                if self.frustum.is_chunk_visible(chunk_x, chunk_z):
-                    frustum_visible_chunks.append((chunk_coords, chunk))
-                else:
-                    frustum_culled += 1
-            
-            chunks_to_render = frustum_visible_chunks
+            self.frustum.extract_planes(proj_matrix * view_matrix)
+            self._cull_mask = self.frustum.visible_mask(
+                self._cull_min_x, self._cull_max_x,
+                self._cull_min_z, self._cull_max_z, self._cull_mask)
+            visible = np.flatnonzero(self._cull_mask)
+            frustum_culled = total_chunks - len(visible)
+        else:
+            visible = np.arange(total_chunks)
 
         # Near to far, so the depth test can throw away fragments hidden behind
         # a closer hill before the fragment shader ever runs on them.
-        player_x = self.player_position.x
-        player_z = self.player_position.z
-        chunks_to_render.sort(
-            key=lambda item: (item[0][0] * CHUNK_SIZE + HALF_CHUNK - player_x) ** 2
-                             + (item[0][1] * CHUNK_SIZE + HALF_CHUNK - player_z) ** 2)
+        dx = self._cull_mid_x[visible] - self.player_position.x
+        dz = self._cull_mid_z[visible] - self.player_position.z
+        order = visible[np.argsort(dx * dx + dz * dz)]
 
         # Straight to the VAO. This loop runs for every visible chunk on every
         # frame, and the two wrapper calls it used to go through did nothing but
         # forward. The transparent pass that followed it was a hasattr check
         # against a method that does not exist; bring it back with the feature.
+        rendered_chunks = 0
         triangles = 0
-        for _, chunk in chunks_to_render:
+        for index in order.tolist():
+            chunk = chunks[index]
             vao = chunk.vao
             if vao is not None:
                 vao.render()
@@ -736,6 +764,7 @@ class ThreadedChunkManager:
             chunk_count = len(self.chunks)
             self.chunks.clear()
             self.loaded_chunks.clear()
+        self._draw_list_dirty = True
         
         print(f"Cleaned up {chunk_count} chunks")
     

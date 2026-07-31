@@ -35,40 +35,49 @@ BLOCK_ATLAS_LAYER = {
     10: 2 + 3 * 4,   # BRICK            = layer 14
 }
 
+# Colour and atlas layer ride along on the vertices rather than sitting in a
+# uniform. That is the whole reason the hotbar is two draw calls instead of 54:
+# with the colour in a uniform, every quad needed its own draw.
 _VERT_COLOR = """
 #version 330 core
 in vec2 in_pos;
+in vec4 in_color;
+out vec4 v_color;
 void main() {
     gl_Position = vec4(in_pos, 0.0, 1.0);
+    v_color = in_color;
 }
 """
 
 _FRAG_COLOR = """
 #version 330 core
-uniform vec4 u_color;
+in vec4 v_color;
 out vec4 fragColor;
-void main() { fragColor = u_color; }
+void main() { fragColor = v_color; }
 """
 
 _VERT_TEX = """
 #version 330 core
 in vec2 in_pos;
 in vec2 in_uv;
+in float in_layer;
 out vec2 v_uv;
+flat out float v_layer;
 void main() {
     gl_Position = vec4(in_pos, 0.0, 1.0);
     v_uv = in_uv;
+    v_layer = in_layer;
 }
 """
 
 _FRAG_TEX = """
 #version 330 core
 in vec2 v_uv;
+flat in float v_layer;
 uniform sampler2DArray u_tex;
-uniform float u_layer;
 out vec4 fragColor;
 void main() {
-    fragColor = texture(u_tex, vec3(v_uv, u_layer));
+    fragColor = texture(u_tex, vec3(v_uv, v_layer));
 }
 """
 
@@ -109,24 +118,20 @@ class HUDRenderer:
         self.tex_prog = ctx.program(
             vertex_shader=_VERT_TEX, fragment_shader=_FRAG_TEX)
 
-        # Placeholder VBOs — rebuilt in _build_geometry
-        self._dummy = np.array([0.0] * 48, dtype=np.float32)
-        self._slot_color_vbo = ctx.buffer(self._dummy.tobytes(), dynamic=True)
-        self._slot_color_vao = ctx.vertex_array(
-            self.color_prog, [(self._slot_color_vbo, '2f', 'in_pos')])
-
-        self._icon_vbo = ctx.buffer(self._dummy.tobytes(), dynamic=True)
-        self._icon_vao = ctx.vertex_array(
-            self.tex_prog, [(self._icon_vbo, '2f 2f', 'in_pos', 'in_uv')])
-
-        self._geom_cache = {}  # slot_index -> (bg_verts, icon_verts, border_verts)
+        # One buffer per program, both written only when the hotbar's contents
+        # change — which is on a resize and on the selected slot moving, not
+        # once a frame.
+        self._color_vbo = None
+        self._color_vao = None
+        self._icon_vbo = None
+        self._icon_vao = None
+        self._color_slot = None      # slot the colour buffer currently holds
         self._build_geometry()
 
     # ------------------------------------------------------------------
     def resize(self, screen_w: int, screen_h: int):
         self.screen_w = screen_w
         self.screen_h = screen_h
-        self._geom_cache.clear()
         self._build_geometry()
 
     def get_selected_block(self, slot: int) -> int:
@@ -165,29 +170,81 @@ class HUDRenderer:
                 'bh': (2.0 / sh) * 2.0,
             })
 
+        # Icons never change — one buffer, built here, drawn in one call.
+        icon_verts = []
+        for i, block_id in enumerate(HOTBAR_BLOCKS):
+            if block_id not in BLOCK_ATLAS_LAYER:
+                continue
+            layer = float(BLOCK_ATLAS_LAYER[block_id])
+            flat = _quad_verts(*self._slots[i]['icon'])
+            for v in range(6):
+                icon_verts.extend(flat[v * 4:v * 4 + 4])
+                icon_verts.append(layer)
+
+        data = np.array(icon_verts, dtype=np.float32)
+        self._icon_count = len(icon_verts) // 5
+        if self._icon_vao is not None:
+            self._icon_vao.release()
+            self._icon_vbo.release()
+        self._icon_vbo = self.ctx.buffer(data.tobytes())
+        self._icon_vao = self.ctx.vertex_array(
+            self.tex_prog, [(self._icon_vbo, '2f 2f 1f', 'in_pos', 'in_uv', 'in_layer')])
+
+        # Backgrounds and borders share one buffer; it is rewritten only when
+        # the highlighted slot moves.
+        if self._color_vao is not None:
+            self._color_vao.release()
+            self._color_vbo.release()
+        self._color_vbo = self.ctx.buffer(
+            reserve=len(HOTBAR_BLOCKS) * 5 * 6 * 6 * 4, dynamic=True)
+        self._color_vao = self.ctx.vertex_array(
+            self.color_prog, [(self._color_vbo, '2f 4f', 'in_pos', 'in_color')])
+        self._color_slot = None
+        self._color_count = 0
 
     # ------------------------------------------------------------------
-    def _draw_colored_quad(self, x0, y0, x1, y1, r, g, b, a):
-        verts = np.array([
-            x0, y0,  x1, y0,  x1, y1,
-            x0, y0,  x1, y1,  x0, y1,
-        ], dtype=np.float32)
-        self._slot_color_vbo.orphan(len(verts) * 4)
-        self._slot_color_vbo.write(verts.tobytes())
-        self.color_prog['u_color'].value = (r, g, b, a)
-        self._slot_color_vao.render(mgl.TRIANGLES, vertices=6)
+    @staticmethod
+    def _push_quad(out, x0, y0, x1, y1, color):
+        for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)):
+            out.append(x)
+            out.append(y)
+            out.extend(color)
 
-    def _draw_textured_quad(self, x0, y0, x1, y1, layer: float):
-        verts = np.array(_quad_verts(x0, y0, x1, y1), dtype=np.float32)
-        self._icon_vbo.orphan(len(verts) * 4)
-        self._icon_vbo.write(verts.tobytes())
-        self.tex_prog['u_layer'].value = layer
-        self._icon_vao.render(mgl.TRIANGLES, vertices=6)
+    def _build_color_data(self, selected_slot: int):
+        """Background and border quads for every slot, in the order they used to
+        be drawn one at a time."""
+        out = []
+        for i in range(len(HOTBAR_BLOCKS)):
+            s = self._slots[i]
+            x0, y0, x1, y1 = s['bg']
+
+            if i == selected_slot:
+                self._push_quad(out, x0, y0, x1, y1, (1.0, 1.0, 1.0, 0.25))
+                bw = abs(_ndc(2, self.screen_w) - _ndc(0, self.screen_w))  # 2px in NDC
+                bh = abs(_ndc(2, self.screen_h) - _ndc(0, self.screen_h))
+                color = (1.0, 0.85, 0.0, 1.0)   # golden yellow
+            else:
+                self._push_quad(out, x0, y0, x1, y1, (0.1, 0.1, 0.1, 0.55))
+                bw = abs(_ndc(1, self.screen_w) - _ndc(0, self.screen_w))
+                bh = abs(_ndc(1, self.screen_h) - _ndc(0, self.screen_h))
+                color = (0.6, 0.6, 0.6, 0.9)
+
+            self._push_quad(out, x0, y0, x1, y0 + bh, color)   # bottom
+            self._push_quad(out, x0, y1 - bh, x1, y1, color)   # top
+            self._push_quad(out, x0, y0, x0 + bw, y1, color)   # left
+            self._push_quad(out, x1 - bw, y0, x1, y1, color)   # right
+
+        return np.array(out, dtype=np.float32)
 
     # ------------------------------------------------------------------
     def render(self, selected_slot: int, block_texture_array):
         """
         Call this after all 3-D rendering, before pg.display.flip().
+
+        Two draw calls: every background and border in one, every icon in the
+        other. Backgrounds still land under the icons, and the borders sit in
+        the 8-pixel margin outside them, so the result is what the 54-call
+        version drew.
 
         :param selected_slot:      Active hotbar slot index (0-based).
         :param block_texture_array: The ModernGL Texture3D / TextureArray bound to unit 0.
@@ -198,49 +255,18 @@ class HUDRenderer:
         ctx.enable(mgl.BLEND)
         ctx.blend_func = mgl.SRC_ALPHA, mgl.ONE_MINUS_SRC_ALPHA
 
-        # Bind the block texture array for icon drawing
+        if self._color_slot != selected_slot:
+            data = self._build_color_data(selected_slot)
+            self._color_vbo.write(data.tobytes())
+            self._color_count = len(data) // 6
+            self._color_slot = selected_slot
+
+        self._color_vao.render(mgl.TRIANGLES, vertices=self._color_count)
+
         if block_texture_array:
             block_texture_array.use(0)
             self.tex_prog['u_tex'].value = 0
-
-        for i, block_id in enumerate(HOTBAR_BLOCKS):
-            s = self._slots[i]
-            x0, y0, x1, y1 = s['bg']
-
-            # ---- slot background ----
-            if i == selected_slot:
-                self._draw_colored_quad(x0, y0, x1, y1, 1.0, 1.0, 1.0, 0.25)
-            else:
-                self._draw_colored_quad(x0, y0, x1, y1, 0.1, 0.1, 0.1, 0.55)
-
-            # ---- block icon ----
-            if block_id in BLOCK_ATLAS_LAYER:
-                ix0, iy0, ix1, iy1 = s['icon']
-                self._draw_textured_quad(ix0, iy0, ix1, iy1,
-                                         float(BLOCK_ATLAS_LAYER[block_id]))
-
-            # ---- slot border ----
-            if i == selected_slot:
-                # Draw 4 thin colored lines as quads (top / bottom / left / right)
-                bw = abs(_ndc(2, self.screen_w) - _ndc(0, self.screen_w))  # 2px in NDC
-                bh = abs(_ndc(2, self.screen_h) - _ndc(0, self.screen_h))
-                color = (1.0, 0.85, 0.0, 1.0)   # golden yellow
-                # bottom
-                self._draw_colored_quad(x0, y0, x1, y0 + bh, *color)
-                # top
-                self._draw_colored_quad(x0, y1 - bh, x1, y1, *color)
-                # left
-                self._draw_colored_quad(x0, y0, x0 + bw, y1, *color)
-                # right
-                self._draw_colored_quad(x1 - bw, y0, x1, y1, *color)
-            else:
-                bw = abs(_ndc(1, self.screen_w) - _ndc(0, self.screen_w))
-                bh = abs(_ndc(1, self.screen_h) - _ndc(0, self.screen_h))
-                color = (0.6, 0.6, 0.6, 0.9)
-                self._draw_colored_quad(x0, y0, x1, y0 + bh, *color)
-                self._draw_colored_quad(x0, y1 - bh, x1, y1, *color)
-                self._draw_colored_quad(x0, y0, x0 + bw, y1, *color)
-                self._draw_colored_quad(x1 - bw, y0, x1, y1, *color)
+            self._icon_vao.render(mgl.TRIANGLES, vertices=self._icon_count)
 
         # Restore state
         ctx.enable(mgl.DEPTH_TEST)

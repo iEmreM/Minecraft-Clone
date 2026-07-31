@@ -30,6 +30,7 @@ class MinecraftModernGL:
         self.last_y = height / 2
         self.first_mouse = True
         self.start_time = time.time()
+        self.last_title_update = 0.0
         
         # Movement
         self.movement_speed = 20.0
@@ -274,8 +275,21 @@ class MinecraftModernGL:
         
         # Update chunk loading based on player position
         self.chunk_manager.update(self.camera.position)
-        
-        # Update window title with FPS and camera position
+
+        self.update_title()
+
+    # Telemetry is a window title, so it only has to keep up with the eye.
+    # Rebuilding it every frame cost 0.9 ms at render distance 24, nearly all of
+    # it get_chunk_info walking every loaded chunk for the LOD histogram.
+    TITLE_INTERVAL = 0.1        # seconds
+
+    def update_title(self):
+        """Window title: FPS, position, chunk and LOD counts, live triangles."""
+        now = time.perf_counter()
+        if now - self.last_title_update < self.TITLE_INTERVAL:
+            return
+        self.last_title_update = now
+
         fps = self.clock.get_fps()
         pos = self.camera.position
         block_names = {

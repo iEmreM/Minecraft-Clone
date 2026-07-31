@@ -90,6 +90,9 @@ class ModernGLRenderer:
         resizes; they used to be re-uploaded on every frame, and the water line
         came with a module import each time on top of that.
         """
+        if self.water_surface:
+            self.water_surface.upload_static_uniforms()
+
         if not self.chunk_program:
             return
 
