@@ -13,8 +13,8 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 ## Features
 
 - **Infinite world:** Terrain is procedurally generated using fast noise and loads dynamically as you explore — there are no borders or pre-built maps.
-- **Block interaction:** Raycasted placement and removal with an 8-block reach, across **123 block types** — stone and ore variants, six wood sets, building blocks, decoration and the full wool palette.
-- **Creative block picker:** `E` opens a grid of every block in the game; click one to drop it into the selected hotbar slot.
+- **Block interaction:** Raycasted placement and removal with an 8-block reach, across **254 block types** — stone, deepslate and ore variants, ten wood sets, building blocks, decoration, the nether and copper families, and the full wool, concrete and terracotta palettes.
+- **Creative block picker:** `E` opens a tabbed window — one page per category plus an "everything" page, scrolled with the wheel. Hover for the block's name, type to search across all categories, click to drop it into the selected hotbar slot.
 - **Walking & flying:** Switch between grounded movement with gravity and collision, and a free-flying mode useful for building or just exploring quickly.
 - **Performance-first rendering:** Render distance is adjustable at runtime (2–96 chunks), chunk geometry is built in background threads so the game never freezes mid-exploration, and frustum culling trims down what actually gets sent to the GPU.
 - **Visual detail:** Custom GLSL shaders, a procedural sky, ambient occlusion on block faces, and a transparent animated water surface.
@@ -31,8 +31,10 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 | Toggle Mouse Capture | `ESC` |
 | Remove Block | `Left Click` |
 | Place Block | `Right Click` |
-| Select Hotbar Slot | `1` - `9` / `Mouse Wheel` |
-| Creative Block Picker | `E` |
+| Select Hotbar Slot | `1` - `9` / `Mouse Wheel` (click a slot while the picker is open) |
+| Creative Block Picker | `E` (`ESC` closes) |
+| Search Blocks by Name | type while the picker is open |
+| Scroll the Block List | `Mouse Wheel` / drag the scrollbar |
 | Adjust Render Distance | `+` / `-` |
 | Toggle Frustum Culling | `F` |
 

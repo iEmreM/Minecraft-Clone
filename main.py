@@ -59,6 +59,8 @@ class MinecraftModernGL:
         self.hud = HUDRenderer(self.renderer.ctx, self.renderer.width, self.renderer.height)
         self.inv_hover = -1        # creative grid index under the mouse
         self._was_captured = True  # mouse state to restore when the picker closes
+        self._swallow_text = False # drop the TEXTINPUT of the key that opened it
+        self.dragging_scrollbar = False
 
         print("Minecraft ModernGL initialized successfully!")
         print("Controls:")
@@ -72,6 +74,8 @@ class MinecraftModernGL:
         print("- Left Click: Remove block")
         print("- Right Click: Place block")
         print(f"- E: Creative block picker — click a block to put it in the selected slot")
+        print("     category tabs at the top, type to search, wheel scrolls the list,")
+        print("     click a hotbar slot to change where the next pick lands")
         print(f"- 1-{HOTBAR_SLOTS}: Select hotbar slot")
         print("- +/-: Increase/Decrease render distance")
         print("- F: Toggle frustum culling")
@@ -125,12 +129,29 @@ class MinecraftModernGL:
             if event.type == pg.QUIT:
                 self.running = False
             
+            # Every printable key belongs to the picker's search box while it is
+            # open, so the picker takes the whole keyboard: E types an 'e' there
+            # instead of closing the window, and ESC is the way out.
+            elif event.type == pg.TEXTINPUT and self.hud.inventory_open:
+                # The E that opened the window arrives as KEYDOWN *and* as the
+                # TEXTINPUT right behind it, by which time the picker is already
+                # open — swallow that one so the box does not start with an 'e'.
+                if self._swallow_text:
+                    self._swallow_text = False
+                else:
+                    self.hud.set_query(self.hud.query + event.text)
+                    self.inv_hover = self.hud.hit_test(*pg.mouse.get_pos())
+
             elif event.type == pg.KEYDOWN:
                 if event.key == pg.K_ESCAPE:
                     if self.hud.inventory_open:
                         self.toggle_inventory()
                     else:
                         self.toggle_mouse_capture()
+                elif self.hud.inventory_open:
+                    if event.key == pg.K_BACKSPACE:
+                        self.hud.set_query(self.hud.query[:-1])
+                        self.inv_hover = self.hud.hit_test(*pg.mouse.get_pos())
                 elif event.key == pg.K_e:
                     self.toggle_inventory()
                 elif pg.K_1 <= event.key <= pg.K_1 + HOTBAR_SLOTS - 1:
@@ -160,14 +181,8 @@ class MinecraftModernGL:
             
             elif event.type == pg.MOUSEBUTTONDOWN:
                 if self.hud.inventory_open:
-                    # Picking a block fills the slot that is already selected,
-                    # so the hotbar stays visible underneath and you can see
-                    # where it landed.
                     if event.button == 1:
-                        block_id = self.hud.block_at(self.hud.hit_test(*event.pos))
-                        if block_id is not None:
-                            self.hud.set_slot(self.hotbar_slot, block_id)
-                            self.selected_block_type = block_id
+                        self.click_picker(event.pos)
                 elif not self.mouse_captured:
                     self.capture_mouse()
                 else:
@@ -177,14 +192,27 @@ class MinecraftModernGL:
                     elif event.button == 3:  # Right click - add block
                         self.add_block()
 
+            elif event.type == pg.MOUSEBUTTONUP:
+                self.dragging_scrollbar = False
+
             elif event.type == pg.MOUSEMOTION:
-                if self.hud.inventory_open:
+                if self.dragging_scrollbar:
+                    self.hud.scroll_to_mouse(event.pos[1])
+                    self.inv_hover = self.hud.hit_test(*event.pos)
+                elif self.hud.inventory_open:
                     self.inv_hover = self.hud.hit_test(*event.pos)
                 elif self.mouse_captured:
                     self.process_mouse_movement(event.rel[0], -event.rel[1])
 
             elif event.type == pg.MOUSEWHEEL:
-                self.select_slot((self.hotbar_slot - event.y) % HOTBAR_SLOTS)
+                # The block list is longer than the panel, so while the picker
+                # is open the wheel scrolls it; clicking a hotbar slot is how
+                # you retarget in the meantime.
+                if self.hud.inventory_open:
+                    self.hud.scroll_by(-event.y * self.hud.scroll_step)
+                    self.inv_hover = self.hud.hit_test(*pg.mouse.get_pos())
+                else:
+                    self.select_slot((self.hotbar_slot - event.y) % HOTBAR_SLOTS)
 
             elif event.type == pg.VIDEORESIZE:
                 self.renderer.resize(event.w, event.h)
@@ -215,6 +243,36 @@ class MinecraftModernGL:
         self.hotbar_slot = slot
         self.selected_block_type = self.hud.hotbar[slot]
 
+    def click_picker(self, pos):
+        """Route a left click inside the open picker to whatever it landed on.
+
+        Order matters only in that the grid is last: it is the one region that
+        covers most of the panel, and the tab row, scrollbar and hotbar all sit
+        outside it anyway.
+        """
+        tab = self.hud.tab_at(*pos)
+        if tab >= 0:
+            self.hud.set_tab(tab)
+            self.inv_hover = self.hud.hit_test(*pos)
+            return
+
+        if self.hud.scrollbar_at(*pos):
+            self.dragging_scrollbar = True
+            self.hud.scroll_to_mouse(pos[1])
+            return
+
+        slot = self.hud.hotbar_slot_at(*pos)
+        if slot >= 0:
+            self.select_slot(slot)
+            return
+
+        # Picking a block fills the slot that is already selected, so the hotbar
+        # stays visible underneath and you can see where it landed.
+        block_id = self.hud.block_at(self.hud.hit_test(*pos))
+        if block_id is not None:
+            self.hud.set_slot(self.hotbar_slot, block_id)
+            self.selected_block_type = block_id
+
     def toggle_inventory(self):
         """Open or close the creative block picker.
 
@@ -226,11 +284,14 @@ class MinecraftModernGL:
 
         if self.hud.inventory_open:
             self._was_captured = self.mouse_captured
+            self._swallow_text = True
             self.release_mouse()
             pg.mouse.set_pos(self.renderer.width // 2, self.renderer.height // 2)
             self.inv_hover = self.hud.hit_test(*pg.mouse.get_pos())
         else:
             self.inv_hover = -1
+            self.dragging_scrollbar = False
+            self.hud.set_query('')
             if self._was_captured:
                 self.capture_mouse()
 
