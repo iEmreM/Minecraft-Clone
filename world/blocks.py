@@ -31,7 +31,10 @@ TOP, BOTTOM, FRONT, BACK, RIGHT, LEFT = range(6)
 # colours (referans/assets/minecraft/textures/colormap/grass.png, plains corner).
 GRASS_TINT = (0x91, 0xBD, 0x59)
 FOLIAGE_TINT = (0x77, 0xAB, 0x2F)
+# Birch and spruce ignore the colormap in the real game too — they carry one
+# constant each, so these are the real values, not plains-biome stand-ins.
 BIRCH_TINT = (0x80, 0xA7, 0x55)
+SPRUCE_TINT = (0x61, 0x99, 0x61)
 
 TINTS = {
     'grass_block_top': GRASS_TINT,
@@ -42,6 +45,7 @@ TINTS = {
     'dark_oak_leaves': FOLIAGE_TINT,
     'mangrove_leaves': FOLIAGE_TINT,
     'birch_leaves': BIRCH_TINT,
+    'spruce_leaves': SPRUCE_TINT,
 }
 
 # Textures that do not exist as a file: (base, overlay) stacked at build time,
@@ -97,12 +101,33 @@ _TABLE = [
         (125, 'Coarse Dirt', 'coarse_dirt'),
         (126, 'Rooted Dirt', 'rooted_dirt'),
         (127, 'Bone Block', ('bone_block_top', 'bone_block_side', 'bone_block_top')),
-        (128, 'Snowy Grass Block', ('grass_block_top', 'grass_block_snow', 'dirt')),
+        # The reference model keeps the green top: there, a snow *layer* block
+        # sits above and hides it. We have no snow layer, so this one block has
+        # to carry the whole look and the top is snow.
+        (128, 'Snowy Grass Block', ('snow', 'grass_block_snow', 'dirt')),
         (129, 'Dripstone Block', 'dripstone_block'),
         (130, 'Sculk', 'sculk'),
         (131, 'Muddy Mangrove Roots', ('muddy_mangrove_roots_top',
                 'muddy_mangrove_roots_side', 'muddy_mangrove_roots_top')),
         (132, 'Soul Soil', 'soul_soil'),
+        (279, 'Budding Amethyst', 'budding_amethyst'),
+        (280, 'Pale Moss Block', 'pale_moss_block'),
+        (281, 'Resin Block', 'resin_block'),
+        (282, 'Wet Sponge', 'wet_sponge'),
+        (283, 'Reinforced Deepslate', ('reinforced_deepslate_top',
+                'reinforced_deepslate_side', 'reinforced_deepslate_bottom')),
+        (284, 'Sculk Catalyst', ('sculk_catalyst_top', 'sculk_catalyst_side',
+                'sculk_catalyst_bottom')),
+        (285, 'Tube Coral Block', 'tube_coral_block'),
+        (286, 'Brain Coral Block', 'brain_coral_block'),
+        (287, 'Bubble Coral Block', 'bubble_coral_block'),
+        (288, 'Fire Coral Block', 'fire_coral_block'),
+        (289, 'Horn Coral Block', 'horn_coral_block'),
+        (290, 'Dead Tube Coral Block', 'dead_tube_coral_block'),
+        (291, 'Dead Brain Coral Block', 'dead_brain_coral_block'),
+        (292, 'Dead Bubble Coral Block', 'dead_bubble_coral_block'),
+        (293, 'Dead Fire Coral Block', 'dead_fire_coral_block'),
+        (294, 'Dead Horn Coral Block', 'dead_horn_coral_block'),
     ]),
     ('Ahşap', [
         (7, 'Oak Log', ('oak_log_top', 'oak_log', 'oak_log_top')),
@@ -145,6 +170,28 @@ _TABLE = [
                 'stripped_mangrove_log', 'stripped_mangrove_log_top')),
         (146, 'Stripped Pale Oak Log', ('stripped_pale_oak_log_top',
                 'stripped_pale_oak_log', 'stripped_pale_oak_log_top')),
+        # "Wood" is the six-sided bark block — same texture as the log's side, on
+        # the ends too. No new atlas layers, just rows.
+        (295, 'Oak Wood', 'oak_log'),
+        (296, 'Birch Wood', 'birch_log'),
+        (297, 'Spruce Wood', 'spruce_log'),
+        (298, 'Jungle Wood', 'jungle_log'),
+        (299, 'Acacia Wood', 'acacia_log'),
+        (300, 'Dark Oak Wood', 'dark_oak_log'),
+        (301, 'Cherry Wood', 'cherry_log'),
+        (302, 'Mangrove Wood', 'mangrove_log'),
+        (303, 'Pale Oak Wood', 'pale_oak_log'),
+        (304, 'Stripped Oak Wood', 'stripped_oak_log'),
+        (305, 'Stripped Birch Wood', 'stripped_birch_log'),
+        (306, 'Stripped Spruce Wood', 'stripped_spruce_log'),
+        (307, 'Stripped Jungle Wood', 'stripped_jungle_log'),
+        (308, 'Stripped Acacia Wood', 'stripped_acacia_log'),
+        (309, 'Stripped Dark Oak Wood', 'stripped_dark_oak_log'),
+        (310, 'Stripped Cherry Wood', 'stripped_cherry_log'),
+        (311, 'Stripped Mangrove Wood', 'stripped_mangrove_log'),
+        (312, 'Stripped Pale Oak Wood', 'stripped_pale_oak_log'),
+        (313, 'Stripped Bamboo Block', ('stripped_bamboo_block_top',
+                'stripped_bamboo_block', 'stripped_bamboo_block_top')),
     ]),
     ('Yaprak', [
         (6, 'Oak Leaves', 'oak_leaves'),
@@ -157,6 +204,7 @@ _TABLE = [
         (148, 'Mangrove Leaves', 'mangrove_leaves'),
         (149, 'Pale Oak Leaves', 'pale_oak_leaves'),
         (150, 'Azalea Leaves', 'azalea_leaves'),
+        (314, 'Flowering Azalea Leaves', 'flowering_azalea_leaves'),
     ]),
     ('Cevher', [
         (59, 'Coal Ore', 'coal_ore'),
@@ -236,6 +284,16 @@ _TABLE = [
         (181, 'Dark Prismarine', 'dark_prismarine'),
         (182, 'Purpur Pillar', ('purpur_pillar_top', 'purpur_pillar',
                 'purpur_pillar_top')),
+        (315, 'Bamboo Mosaic', 'bamboo_mosaic'),
+        (316, 'Chiseled Tuff Bricks', ('chiseled_tuff_bricks_top',
+                'chiseled_tuff_bricks', 'chiseled_tuff_bricks_top')),
+        (317, 'Cracked Deepslate Tiles', 'cracked_deepslate_tiles'),
+        (318, 'Cracked Polished Blackstone Bricks',
+                'cracked_polished_blackstone_bricks'),
+        (319, 'Resin Bricks', 'resin_bricks'),
+        (320, 'Chiseled Resin Bricks', 'chiseled_resin_bricks'),
+        (321, 'Smooth Quartz', 'quartz_block_bottom'),
+        (322, 'Target', ('target_top', 'target_side', 'target_top')),
     ]),
     ('Dekor', [
         (93, 'Crafting Table', ('crafting_table_top', 'crafting_table_side', 'oak_planks',
@@ -279,6 +337,16 @@ _TABLE = [
         (196, 'Shroomlight', 'shroomlight'),
         (197, 'Brown Mushroom Block', 'brown_mushroom_block'),
         (198, 'Red Mushroom Block', 'red_mushroom_block'),
+        (323, 'Dropper', ('furnace_top', 'furnace_side', 'furnace_top',
+                'dropper_front')),
+        (324, 'Bee Nest', ('bee_nest_top', 'bee_nest_side', 'bee_nest_bottom',
+                'bee_nest_front')),
+        (325, 'Beehive', ('beehive_end', 'beehive_side', 'beehive_end',
+                'beehive_front')),
+        (326, 'Creaking Heart', ('creaking_heart_top', 'creaking_heart',
+                'creaking_heart_top')),
+        (327, 'Respawn Anchor', ('respawn_anchor_top_off', 'respawn_anchor_side0',
+                'respawn_anchor_bottom')),
     ]),
     ('Yün', [
         (109, 'White Wool', 'white_wool'),
@@ -315,6 +383,22 @@ _TABLE = [
         (212, 'Purple Concrete', 'purple_concrete'),
         (213, 'Magenta Concrete', 'magenta_concrete'),
         (214, 'Pink Concrete', 'pink_concrete'),
+        (328, 'White Concrete Powder', 'white_concrete_powder'),
+        (329, 'Light Gray Concrete Powder', 'light_gray_concrete_powder'),
+        (330, 'Gray Concrete Powder', 'gray_concrete_powder'),
+        (331, 'Black Concrete Powder', 'black_concrete_powder'),
+        (332, 'Brown Concrete Powder', 'brown_concrete_powder'),
+        (333, 'Red Concrete Powder', 'red_concrete_powder'),
+        (334, 'Orange Concrete Powder', 'orange_concrete_powder'),
+        (335, 'Yellow Concrete Powder', 'yellow_concrete_powder'),
+        (336, 'Lime Concrete Powder', 'lime_concrete_powder'),
+        (337, 'Green Concrete Powder', 'green_concrete_powder'),
+        (338, 'Cyan Concrete Powder', 'cyan_concrete_powder'),
+        (339, 'Light Blue Concrete Powder', 'light_blue_concrete_powder'),
+        (340, 'Blue Concrete Powder', 'blue_concrete_powder'),
+        (341, 'Purple Concrete Powder', 'purple_concrete_powder'),
+        (342, 'Magenta Concrete Powder', 'magenta_concrete_powder'),
+        (343, 'Pink Concrete Powder', 'pink_concrete_powder'),
     ]),
     ('Terrakota', [
         (215, 'White Terracotta', 'white_terracotta'),
@@ -344,6 +428,12 @@ _TABLE = [
         (237, 'Oxidized Cut Copper', 'oxidized_cut_copper'),
         (238, 'Chiseled Copper', 'chiseled_copper'),
         (239, 'Copper Bulb', 'copper_bulb'),
+        (344, 'Exposed Chiseled Copper', 'exposed_chiseled_copper'),
+        (345, 'Weathered Chiseled Copper', 'weathered_chiseled_copper'),
+        (346, 'Oxidized Chiseled Copper', 'oxidized_chiseled_copper'),
+        (347, 'Exposed Copper Bulb', 'exposed_copper_bulb'),
+        (348, 'Weathered Copper Bulb', 'weathered_copper_bulb'),
+        (349, 'Oxidized Copper Bulb', 'oxidized_copper_bulb'),
     ]),
     ('Nether', [
         (240, 'Blackstone', ('blackstone_top', 'blackstone', 'blackstone_top')),
@@ -364,6 +454,17 @@ _TABLE = [
         (254, 'Ancient Debris', ('ancient_debris_top', 'ancient_debris_side',
                 'ancient_debris_top')),
         (255, 'Crying Obsidian', 'crying_obsidian'),
+        (350, 'Chiseled Nether Bricks', 'chiseled_nether_bricks'),
+        (351, 'Cracked Nether Bricks', 'cracked_nether_bricks'),
+        # Hyphae is the stem's bark on all six faces, as Wood is to Log.
+        (352, 'Crimson Hyphae', 'crimson_stem'),
+        (353, 'Warped Hyphae', 'warped_stem'),
+        (354, 'Stripped Crimson Stem', ('stripped_crimson_stem_top',
+                'stripped_crimson_stem', 'stripped_crimson_stem_top')),
+        (355, 'Stripped Warped Stem', ('stripped_warped_stem_top',
+                'stripped_warped_stem', 'stripped_warped_stem_top')),
+        (356, 'Stripped Crimson Hyphae', 'stripped_crimson_stem'),
+        (357, 'Stripped Warped Hyphae', 'stripped_warped_stem'),
     ]),
     # Every block in this group is see-through, and that is not a cosmetic
     # label: TRANSPARENT below is built from it, the mesher routes their quads
@@ -395,6 +496,7 @@ _TABLE = [
         (276, 'Exposed Copper Grate', 'exposed_copper_grate'),
         (277, 'Weathered Copper Grate', 'weathered_copper_grate'),
         (278, 'Oxidized Copper Grate', 'oxidized_copper_grate'),
+        (358, 'Spawner', 'spawner'),
     ]),
 ]
 
