@@ -3,11 +3,12 @@ import sys
 import time
 from engine.renderer import ModernGLRenderer
 from engine.camera import Camera
-from world.modern_chunk import ModernChunk, CHUNK_SIZE, CHUNK_HEIGHT, AIR, GRASS, DIRT, STONE, SAND, SNOW, LEAVES, WOOD, WATER, STONE_BRICK, BRICK
+from world.modern_chunk import AIR, GRASS
+from world.blocks import BLOCK_NAMES
 from world.threaded_chunk_manager import ThreadedChunkManager
 import glm
 import math
-from engine.hud import HUDRenderer, HOTBAR_BLOCKS
+from engine.hud import HUDRenderer, HOTBAR_SLOTS
 
 
 class MinecraftModernGL:
@@ -55,8 +56,10 @@ class MinecraftModernGL:
         self.load_texture()
         
         # HUD / hotbar (must be created after renderer/ctx is ready)
-        self.hud = HUDRenderer(self.renderer.ctx, 1200, 800)
-        
+        self.hud = HUDRenderer(self.renderer.ctx, self.renderer.width, self.renderer.height)
+        self.inv_hover = -1        # creative grid index under the mouse
+        self._was_captured = True  # mouse state to restore when the picker closes
+
         print("Minecraft ModernGL initialized successfully!")
         print("Controls:")
         print("- WASD: Move (walk/fly)")
@@ -64,11 +67,12 @@ class MinecraftModernGL:
         print("- Space: Jump (walking) / Up (flying)")
         print("- Shift: Down (flying only)")
         print("- TAB: Toggle flying mode")
-        print("- ESC: Toggle mouse capture")
+        print("- ESC: Toggle mouse capture (closes the block picker)")
         print("- Click to capture mouse")
         print("- Left Click: Remove block")
         print("- Right Click: Place block")
-        print("- 1-8: Select block type (Grass/Dirt/Stone/Sand/Snow/Leaves/Wood/Water)")
+        print(f"- E: Creative block picker — click a block to put it in the selected slot")
+        print(f"- 1-{HOTBAR_SLOTS}: Select hotbar slot")
         print("- +/-: Increase/Decrease render distance")
         print("- F: Toggle frustum culling")
         print("")
@@ -123,34 +127,14 @@ class MinecraftModernGL:
             
             elif event.type == pg.KEYDOWN:
                 if event.key == pg.K_ESCAPE:
-                    self.toggle_mouse_capture()
-                elif event.key == pg.K_1:
-                    self.hotbar_slot = 0
-                    self.selected_block_type = HOTBAR_BLOCKS[0]
-                elif event.key == pg.K_2:
-                    self.hotbar_slot = 1
-                    self.selected_block_type = HOTBAR_BLOCKS[1]
-                elif event.key == pg.K_3:
-                    self.hotbar_slot = 2
-                    self.selected_block_type = HOTBAR_BLOCKS[2]
-                elif event.key == pg.K_4:
-                    self.hotbar_slot = 3
-                    self.selected_block_type = HOTBAR_BLOCKS[3]
-                elif event.key == pg.K_5:
-                    self.hotbar_slot = 4
-                    self.selected_block_type = HOTBAR_BLOCKS[4]
-                elif event.key == pg.K_6:
-                    self.hotbar_slot = 5
-                    self.selected_block_type = HOTBAR_BLOCKS[5]
-                elif event.key == pg.K_7:
-                    self.hotbar_slot = 6
-                    self.selected_block_type = HOTBAR_BLOCKS[6]
-                elif event.key == pg.K_8:
-                    self.hotbar_slot = 7
-                    self.selected_block_type = HOTBAR_BLOCKS[7]
-                elif event.key == pg.K_9:
-                    self.hotbar_slot = 8
-                    self.selected_block_type = HOTBAR_BLOCKS[8]
+                    if self.hud.inventory_open:
+                        self.toggle_inventory()
+                    else:
+                        self.toggle_mouse_capture()
+                elif event.key == pg.K_e:
+                    self.toggle_inventory()
+                elif pg.K_1 <= event.key <= pg.K_1 + HOTBAR_SLOTS - 1:
+                    self.select_slot(event.key - pg.K_1)
                 # Render distance controls
                 elif event.key == pg.K_EQUALS or event.key == pg.K_KP_PLUS:  # + key
                     new_distance = min(self.render_distance + 1, 96)  # Max 96 chunks
@@ -175,7 +159,16 @@ class MinecraftModernGL:
                     self.renderer.toggle_wireframe()
             
             elif event.type == pg.MOUSEBUTTONDOWN:
-                if not self.mouse_captured:
+                if self.hud.inventory_open:
+                    # Picking a block fills the slot that is already selected,
+                    # so the hotbar stays visible underneath and you can see
+                    # where it landed.
+                    if event.button == 1:
+                        block_id = self.hud.block_at(self.hud.hit_test(*event.pos))
+                        if block_id is not None:
+                            self.hud.set_slot(self.hotbar_slot, block_id)
+                            self.selected_block_type = block_id
+                elif not self.mouse_captured:
                     self.capture_mouse()
                 else:
                     # Handle block interaction when mouse is captured
@@ -183,15 +176,16 @@ class MinecraftModernGL:
                         self.remove_block()
                     elif event.button == 3:  # Right click - add block
                         self.add_block()
-            
+
             elif event.type == pg.MOUSEMOTION:
-                if self.mouse_captured:
+                if self.hud.inventory_open:
+                    self.inv_hover = self.hud.hit_test(*event.pos)
+                elif self.mouse_captured:
                     self.process_mouse_movement(event.rel[0], -event.rel[1])
-            
+
             elif event.type == pg.MOUSEWHEEL:
-                self.hotbar_slot = (self.hotbar_slot - event.y) % len(HOTBAR_BLOCKS)
-                self.selected_block_type = HOTBAR_BLOCKS[self.hotbar_slot]
-            
+                self.select_slot((self.hotbar_slot - event.y) % HOTBAR_SLOTS)
+
             elif event.type == pg.VIDEORESIZE:
                 self.renderer.resize(event.w, event.h)
                 self.hud.resize(event.w, event.h)
@@ -215,7 +209,32 @@ class MinecraftModernGL:
             self.release_mouse()
         else:
             self.capture_mouse()
-    
+
+    def select_slot(self, slot):
+        """Point the hotbar at *slot* and pick up whatever is in it."""
+        self.hotbar_slot = slot
+        self.selected_block_type = self.hud.hotbar[slot]
+
+    def toggle_inventory(self):
+        """Open or close the creative block picker.
+
+        The picker needs a visible cursor, so it borrows the mouse and hands it
+        back in the state it found it — closing with ESC while the mouse had
+        never been captured should not capture it.
+        """
+        self.hud.inventory_open = not self.hud.inventory_open
+
+        if self.hud.inventory_open:
+            self._was_captured = self.mouse_captured
+            self.release_mouse()
+            pg.mouse.set_pos(self.renderer.width // 2, self.renderer.height // 2)
+            self.inv_hover = self.hud.hit_test(*pg.mouse.get_pos())
+        else:
+            self.inv_hover = -1
+            if self._was_captured:
+                self.capture_mouse()
+
+
     def process_mouse_movement(self, xoffset, yoffset):
         """Process mouse movement for camera control"""
         if self.first_mouse:
@@ -230,10 +249,16 @@ class MinecraftModernGL:
     def process_keyboard(self):
         """Process keyboard input for movement using strafe system like original main.py"""
         keys = pg.key.get_pressed()
-        
+
         # Reset strafe state
         self.camera.strafe = [0, 0]
-        
+
+        # The picker eats movement: WASD would otherwise walk the player around
+        # behind a window they cannot see past. Gravity still runs.
+        if self.hud.inventory_open:
+            self.camera.sprinting = False
+            return
+
         # Sprint status
         self.camera.sprinting = keys[pg.K_LSHIFT] or keys[pg.K_RSHIFT]
         
@@ -292,12 +317,11 @@ class MinecraftModernGL:
 
         fps = self.clock.get_fps()
         pos = self.camera.position
-        block_names = {
-            GRASS: "Grass", DIRT: "Dirt", STONE: "Stone", SAND: "Sand",
-            SNOW: "Snow", LEAVES: "Leaves", WOOD: "Wood", WATER: "Water",
-            STONE_BRICK: "Stone Brick", BRICK: "Brick"
-        }
-        selected_name = block_names.get(self.selected_block_type, "Unknown")
+        # The title is the only text the game can draw, so it doubles as the
+        # picker's tooltip: hovering a block names it.
+        hovered = self.hud.block_at(self.inv_hover) if self.hud.inventory_open else None
+        shown = hovered if hovered is not None else self.selected_block_type
+        selected_name = BLOCK_NAMES.get(shown, "Unknown")
         chunk_info = self.chunk_manager.get_chunk_info()
         chunks_loaded = chunk_info['loaded_chunks']
         pending_chunks = chunk_info['pending_chunks']
@@ -369,7 +393,11 @@ class MinecraftModernGL:
         
         # Draw hotbar via OpenGL overlay
         self.hud.render(self.hotbar_slot, self.renderer.block_texture)
-        
+
+        # Creative picker sits on top of the hotbar, not instead of it
+        if self.hud.inventory_open:
+            self.hud.render_inventory(self.inv_hover, self.renderer.block_texture)
+
         # Swap buffers
         pg.display.flip()
     

@@ -18,6 +18,7 @@ import time
 
 import numpy as np
 
+from world.blocks import FACE_LAYER
 from world.fast_builder import (AIR, SEAL_COVER, STONE, WATER,
                                 build_chunk_mesh_fast, column_seal_limit,
                                 make_mesh_buffers, seal_buried_air)
@@ -128,14 +129,15 @@ def main():
     quads_by_lod = {}
     for lod in (0, 1, 2):
         build_chunk_mesh_fast(chunks[(1, 1)], 1, 1, neighbors_of(chunks, 1, 1),
-                              buffers[0], buffers[1], lod)          # warm the JIT
+                              buffers[0], buffers[1], FACE_LAYER, lod)   # warm the JIT
 
         quads = triangles = 0
         started = time.perf_counter()
         for chunk_x, chunk_z in inner:
             vertices, indices = build_chunk_mesh_fast(
                 chunks[(chunk_x, chunk_z)], chunk_x, chunk_z,
-                neighbors_of(chunks, chunk_x, chunk_z), buffers[0], buffers[1], lod)
+                neighbors_of(chunks, chunk_x, chunk_z), buffers[0], buffers[1],
+                FACE_LAYER, lod)
             quads += len(vertices) // 28
             triangles += len(indices) // 3
             check_footprint(vertices, chunk_x, chunk_z, lod)

@@ -5,6 +5,7 @@ from engine.shader_manager import ShaderManager
 from engine.water_surface import WaterSurface
 from engine.sky import SkyRenderer
 from world.terrain_generator import WATER_LINE
+from world.blocks import LAYER_COUNT
 import glm
 import math
 
@@ -225,6 +226,18 @@ class ModernGLRenderer:
                 full_data
             )
             
+            texture_array.repeat_x = True # Allow tiling
+            texture_array.repeat_y = True
+            texture_array.build_mipmaps()
+
+            # Order matters: build_mipmaps() overwrites filter with
+            # (LINEAR_MIPMAP_LINEAR, LINEAR), so setting it first silently
+            # threw the choice away and every block was bilinearly upscaled.
+            # That was invisible while a tile was 64x64 — LINEAR magnification
+            # only engages once a block covers more than one screen pixel per
+            # texel, i.e. inside ~10 blocks — but a 16x16 tile crosses that
+            # line at ~39 blocks, so the whole near field went soft.
+            #
             # Nearest inside a mip level keeps the blocky look up close;
             # blending *between* levels removes the band that used to sweep
             # across the ground as you walk. Anisotropy is what actually
@@ -234,11 +247,9 @@ class ModernGLRenderer:
             # what turns distant ground into mush. The driver clamps the 16 to
             # whatever it supports.
             texture_array.filter = (mgl.NEAREST_MIPMAP_LINEAR, mgl.NEAREST)
-            texture_array.repeat_x = True # Allow tiling
-            texture_array.repeat_y = True
-            texture_array.build_mipmaps()
             texture_array.anisotropy = 16.0
-            
+
+
             return texture_array
             
         except Exception as e:
@@ -279,9 +290,11 @@ class ModernGLRenderer:
     
     def load_textures(self):
         """Load block and water textures"""
-        # Load block texture as Array (texture unit 0)
-        # Assuming texture.png is 4x4 atlas
-        self.block_texture = self.create_texture_array('texture.png', 4, 4)
+        # texture.png is a single 16-wide column of 16x16 tiles, baked by
+        # build_atlas.py — so a tile's row *is* its array layer, and
+        # world/blocks.py can hand out layer numbers without knowing the atlas
+        # shape. It used to be a 4x4 grid, which capped the game at 16 textures.
+        self.block_texture = self.create_texture_array('texture.png', 1, LAYER_COUNT)
         if self.block_texture:
             self.block_texture.use(0)
             # Force repeat

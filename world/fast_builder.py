@@ -255,12 +255,18 @@ def get_face_ao(blocks, neighbors, nlimits, x, y, z, face_id):
     return code
 
 @njit(nogil=True, fastmath=True, cache=True)
-def emit_greedy_quad(vertices, offset, chunk_x, chunk_z, x, y, z, width, height, face_id, block_type, ao_code):
+def emit_greedy_quad(vertices, offset, chunk_x, chunk_z, x, y, z, width, height, face_id, block_type, ao_code, face_layers):
     """
     Write one greedy quad's 4 vertices into *vertices* starting at *offset*.
 
     *ao_code* is the packed per-corner AO from get_face_ao; every block merged
     into this quad shares it.
+
+    *face_layers* is blocks.FACE_LAYER — [block_type, face_id] -> atlas layer.
+    It arrives as an argument rather than as a module global because
+    @njit(cache=True) freezes globals into the cached artifact without
+    invalidating it when they change, so a newly added block would silently
+    keep the old block's texture.
 
     Writes in place and uses tuples for the corner coordinates: this used to
     allocate five small numpy arrays per quad, which cost about a third of the
@@ -329,42 +335,12 @@ def emit_greedy_quad(vertices, offset, chunk_x, chunk_z, x, y, z, width, height,
         vz = (z_min, z_max, z_max, z_min)
         shading = 0.6
 
-    # Texture Layer Logic
-    # 4x4 Atlas
-    tex_x = 0; tex_y = 0
-    
-    # Block IDs
-    GRASS = 1
-    DIRT = 2
-    STONE = 3
-    SAND = 4
-    SNOW = 5
-    LEAVES = 6
-    WOOD = 7
-    WATER = 8
-    STONE_BRICK = 9
-    BRICK = 10
-    
-    if block_type == GRASS:
-        if face_id == 0: tex_x, tex_y = 1, 3
-        elif face_id == 1: tex_x, tex_y = 0, 2
-        else: tex_x, tex_y = 0, 3
-    elif block_type == DIRT: tex_x, tex_y = 0, 2
-    elif block_type == STONE: tex_x, tex_y = 0, 1
-    elif block_type == SAND: tex_x, tex_y = 1, 2
-    elif block_type == SNOW: tex_x, tex_y = 3, 0
-    elif block_type == LEAVES: tex_x, tex_y = 1, 0
-    elif block_type == WOOD:
-        if face_id == 0 or face_id == 1: tex_x, tex_y = 0, 0
-        else: tex_x, tex_y = 2, 1
-    elif block_type == WATER: tex_x, tex_y = 3, 0
-    elif block_type == STONE_BRICK: tex_x, tex_y = 2, 2
-    elif block_type == BRICK: tex_x, tex_y = 2, 3
+    # Atlas layer for this block's face. One table lookup — the per-block
+    # if-chain that used to live here had to grow a branch per block type, and
+    # the same coordinates were repeated in engine/hud.py by hand.
+    layer = float(face_layers[block_type, face_id])
 
-    # Calculate layer index (row-major 4x4)
-    # Assumes create_texture_array iterates y then x
-    layer = float(tex_x + tex_y * 4)
-    
+
     # UV Coordinates for Tiling
     # Simply 0 to the quad's world size, so one tile still covers one block
     u_min = 0.0
@@ -394,12 +370,15 @@ def emit_greedy_quad(vertices, offset, chunk_x, chunk_z, x, y, z, width, height,
         vertices[base+6] = shading * AO_LEVELS[(ao_code >> (2 * i)) & 3]
 
 @njit(nogil=True, fastmath=True, cache=True)
-def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices, lod=0):
+def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices, face_layers, lod=0):
     """
     Fast chunk mesh builder using Greedy Meshing (Texture Array version)
 
     *neighbors* is the (-X, +X, -Z, +Z) tuple of neighbor block arrays; see
     get_block_ext. Pass NO_NEIGHBOR for any chunk that is not loaded.
+
+    *face_layers* is blocks.FACE_LAYER, passed straight through to
+    emit_greedy_quad — see there for why it is not a global.
 
     *vertices* and *indices* are reusable scratch space from make_mesh_buffers;
     the caller keeps one set per meshing thread. Returns fresh right-sized
@@ -565,7 +544,7 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices
                         
                         emit_greedy_quad(vertices, vertex_count * 7, chunk_x, chunk_z,
                                          q_x, q_y, q_z, width, height, face_id,
-                                         block_type, ao_code)
+                                         block_type, ao_code, face_layers)
 
                         # Split the quad along its brighter diagonal. Cutting
                         # across the dark one smears a single dark corner over

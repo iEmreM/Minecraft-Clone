@@ -13,7 +13,8 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 ## Features
 
 - **Infinite world:** Terrain is procedurally generated using fast noise and loads dynamically as you explore — there are no borders or pre-built maps.
-- **Block interaction:** Raycasted placement and removal with an 8-block reach, supporting eight distinct block types: Grass, Dirt, Stone, Sand, Snow, Leaves, Wood, and Water.
+- **Block interaction:** Raycasted placement and removal with an 8-block reach, across **123 block types** — stone and ore variants, six wood sets, building blocks, decoration and the full wool palette.
+- **Creative block picker:** `E` opens a grid of every block in the game; click one to drop it into the selected hotbar slot.
 - **Walking & flying:** Switch between grounded movement with gravity and collision, and a free-flying mode useful for building or just exploring quickly.
 - **Performance-first rendering:** Render distance is adjustable at runtime (2–96 chunks), chunk geometry is built in background threads so the game never freezes mid-exploration, and frustum culling trims down what actually gets sent to the GPU.
 - **Visual detail:** Custom GLSL shaders, a procedural sky, ambient occlusion on block faces, and a transparent animated water surface.
@@ -30,7 +31,8 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 | Toggle Mouse Capture | `ESC` |
 | Remove Block | `Left Click` |
 | Place Block | `Right Click` |
-| Select Block Type | `1` - `8` |
+| Select Hotbar Slot | `1` - `9` / `Mouse Wheel` |
+| Creative Block Picker | `E` |
 | Adjust Render Distance | `+` / `-` |
 | Toggle Frustum Culling | `F` |
 
@@ -85,9 +87,11 @@ Minecraft-Clone/
 ├── engine/                 # Core engine components (rendering, camera systems, culling)
 ├── shaders/                # Custom GLSL vertex and fragment shaders 
 ├── world/                  # Voxel generation, chunk management, multi-threading
+│   └── blocks.py           # Block registry — id, name, per-face texture, hotbar
 ├── main.py                 # Application entry point and game loop
+├── build_atlas.py          # Bakes texture.png from the block registry (dev tool)
 ├── requirements.txt        # Python dependency manifest
-├── texture.png             # Block texture atlas (spritesheet)
+├── texture.png             # Block texture array: 16x16 tiles in one column
 └── README.md               # Project documentation
 ```
 
