@@ -1,12 +1,13 @@
 import math
 import os
 import glm
+import moderngl as mgl
 import numpy as np
 import threading
 import queue
 import time
 from world.modern_chunk import ModernChunk, CHUNK_SIZE
-from world.blocks import FACE_LAYER
+from world.blocks import FACE_LAYER, OPAQUE
 from world.fast_builder import build_chunk_mesh_fast, make_mesh_buffers, NO_NEIGHBOR
 from engine.frustum import Frustum
 
@@ -145,13 +146,12 @@ class ThreadedChunkManager:
 
         # Mesh only after every chunk exists, so each one can see its neighbors
         # and skip the seam faces they cover.
-        scratch_vertices, scratch_indices = make_mesh_buffers()
+        scratch = make_mesh_buffers()
         for chunk_x, chunk_z in generated:
             chunk = self.chunks[(chunk_x, chunk_z)]
-            vertices, indices = build_chunk_mesh_fast(
+            chunk.upload_mesh(*build_chunk_mesh_fast(
                 chunk.blocks, chunk_x, chunk_z, self._neighbor_blocks(chunk_x, chunk_z),
-                scratch_vertices, scratch_indices, FACE_LAYER)
-            chunk.upload_mesh(vertices, indices)
+                *scratch, FACE_LAYER, OPAQUE))
 
         generated_count = len(generated)
         self.initial_chunks_generated = True
@@ -215,7 +215,7 @@ class ThreadedChunkManager:
         """Background thread worker for chunk loading and mesh building"""
         # Owned by this thread for its whole life, so meshing allocates nothing
         # big and nothing is shared with the main thread's own set.
-        scratch_vertices, scratch_indices = make_mesh_buffers()
+        scratch = make_mesh_buffers()
 
         while not self.should_stop:
             try:
@@ -265,17 +265,16 @@ class ThreadedChunkManager:
                             and mesh_request['seq'] == chunk.mesh_seq):
                         # Build mesh in background thread. The neighbor arrays were
                         # picked up on the main thread when the request was queued.
-                        vertices_array, indices_array = build_chunk_mesh_fast(
+                        mesh = build_chunk_mesh_fast(
                             chunk.blocks, chunk.chunk_x, chunk.chunk_z, mesh_request['neighbors'],
-                            scratch_vertices, scratch_indices, FACE_LAYER, mesh_request['lod']
+                            *scratch, FACE_LAYER, OPAQUE, mesh_request['lod']
                         )
 
                         # Queue completed mesh for main thread
                         self.completed_meshes.put({
                             'coords': chunk_coords,
                             'seq': mesh_request['seq'],
-                            'vertices': vertices_array,
-                            'indices': indices_array
+                            'mesh': mesh,
                         })
                 except queue.Empty:
                     pass
@@ -539,7 +538,7 @@ class ThreadedChunkManager:
                 # order they were given work, so without the stamp an older
                 # mesh could land on top of a newer one.
                 if chunk is not None and mesh_data['seq'] == chunk.mesh_seq:
-                    chunk.upload_mesh(mesh_data['vertices'], mesh_data['indices'])
+                    chunk.upload_mesh(*mesh_data['mesh'])
 
                 # Counted either way, so a burst of stale results cannot blow
                 # past the per-frame budget.
@@ -735,10 +734,10 @@ class ThreadedChunkManager:
 
         # Straight to the VAO. This loop runs for every visible chunk on every
         # frame, and the two wrapper calls it used to go through did nothing but
-        # forward. The transparent pass that followed it was a hasattr check
-        # against a method that does not exist; bring it back with the feature.
+        # forward.
         rendered_chunks = 0
         triangles = 0
+        see_through = []
         for index in order.tolist():
             chunk = chunks[index]
             vao = chunk.vao
@@ -746,6 +745,29 @@ class ThreadedChunkManager:
                 vao.render()
                 rendered_chunks += 1
                 triangles += chunk.vertex_count
+            if chunk.vao_t is not None:
+                see_through.append(chunk)
+
+        # Second pass: glass, ice and the other see-through blocks, after every
+        # opaque chunk, so there is something behind them to blend with. Far to
+        # near — the reverse of the pass above, which was already sorted — so a
+        # nearer pane blends over a farther one instead of hiding it.
+        #
+        # Depth writes stay ON. Turned off, panes inside one chunk blend in
+        # mesher order, which is neither back-to-front nor stable as you walk;
+        # left on, the worst case is a farther pane missing behind a nearer one,
+        # and no flicker. Sorting quads per frame is the real fix and costs more
+        # than this feature is worth (referans.md: TranslucencyPointOfView).
+        #
+        # Nothing generated is transparent, so on a fresh world this list is
+        # empty and the whole block is one branch.
+        if see_through:
+            self.renderer.ctx.enable(mgl.BLEND)
+            self.renderer.ctx.blend_func = mgl.SRC_ALPHA, mgl.ONE_MINUS_SRC_ALPHA
+            for chunk in reversed(see_through):
+                chunk.vao_t.render()
+                triangles += chunk.vertex_count_t
+            self.renderer.ctx.disable(mgl.BLEND)
 
         return rendered_chunks, total_chunks, frustum_culled, triangles // 3
 

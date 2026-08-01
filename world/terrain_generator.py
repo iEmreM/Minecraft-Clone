@@ -11,6 +11,7 @@ Features:
 import numpy as np
 import math
 from numba import njit
+from world.blocks import BLOCK_DTYPE
 from world.fast_noise import fast_noise2, fast_noise3
 
 # Block type constants
@@ -303,7 +304,9 @@ class AdvancedTerrainGenerator:
         # Warmup JIT (Optional but good for first frame spike prevention)
         # We can call the function with dummy data
         print("Warming up Terrain Generator JIT...")
-        dummy = np.zeros((16, 256, 16), dtype=np.uint8)
+        # Same dtype as ModernChunk.blocks — numba specialises on it, so warming
+        # the wrong one just compiles a second copy at the first real chunk.
+        dummy = np.zeros((16, 256, 16), dtype=BLOCK_DTYPE)
         generate_chunk_fast(0, 0, dummy)
         print("Terrain Generator JIT Ready.")
     

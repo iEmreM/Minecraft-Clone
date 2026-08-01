@@ -1,5 +1,7 @@
 import numpy as np
 
+from world.blocks import BLOCK_DTYPE
+
 # Block types
 AIR = 0
 GRASS = 1
@@ -25,13 +27,20 @@ class ModernChunk:
         self.chunk_manager = chunk_manager  # Reference to ThreadedChunkManager for async mesh requests
         
         # Initialize block data
-        self.blocks = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=np.uint8)
-        
-        # Rendering data. The chunk owns all three GL objects — see release_gl.
+        self.blocks = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=BLOCK_DTYPE)
+
+        # Rendering data. The chunk owns all six GL objects — see release_gl.
+        # The `_t` set is the see-through geometry, drawn in a second, blended
+        # pass after every opaque chunk; it is None on the vast majority of
+        # chunks, because nothing generated is transparent.
         self.vao = None
         self.vbo = None
         self.ibo = None
+        self.vao_t = None
+        self.vbo_t = None
+        self.ibo_t = None
         self.vertex_count = 0
+        self.vertex_count_t = 0
         # Sequence number of the newest mesh build requested for this chunk.
         # Several workers can be building this chunk at once and they do not
         # finish in the order they started, so results that are not the newest
@@ -79,13 +88,23 @@ class ModernChunk:
         self.is_generated = chunk_data.get('is_generated', True)
         self.is_modified = chunk_data.get('is_modified', False)
 
-    def upload_mesh(self, vertices, indices):
-        """Hand a freshly built mesh to the GPU. Main thread only (OpenGL)."""
+    def upload_mesh(self, vertices, indices, t_vertices=None, t_indices=None):
+        """Hand a freshly built mesh to the GPU. Main thread only (OpenGL).
+
+        The second pair is the see-through geometry; it gets its own VAO because
+        it is drawn with a different program (`chunk_alpha`, which blends and
+        discards) and the opaque one must stay exactly as it was.
+        """
         self.release_gl()
 
         if len(vertices) > 0:
             self.vao, self.vbo, self.ibo = self.renderer.create_vao(vertices, indices)
             self.vertex_count = len(indices)
+
+        if t_vertices is not None and len(t_vertices) > 0:
+            self.vao_t, self.vbo_t, self.ibo_t = self.renderer.create_vao(
+                t_vertices, t_indices, transparent=True)
+            self.vertex_count_t = len(t_indices)
 
     def release_gl(self):
         """Free this chunk's GPU objects.
@@ -96,14 +115,19 @@ class ModernChunk:
         chunk unload and every mesh rebuild leaked the chunk's whole mesh,
         ~180 KB for average terrain.
         """
-        for gl_object in (self.vao, self.vbo, self.ibo):
+        for gl_object in (self.vao, self.vbo, self.ibo,
+                          self.vao_t, self.vbo_t, self.ibo_t):
             if gl_object is not None:
                 gl_object.release()
 
         self.vao = None
         self.vbo = None
         self.ibo = None
+        self.vao_t = None
+        self.vbo_t = None
+        self.ibo_t = None
         self.vertex_count = 0
+        self.vertex_count_t = 0
 
     def get_block(self, x, y, z):
         """Get block type at local chunk coordinates"""

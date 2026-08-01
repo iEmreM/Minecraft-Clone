@@ -13,7 +13,8 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 ## Features
 
 - **Infinite world:** Terrain is procedurally generated using fast noise and loads dynamically as you explore — there are no borders or pre-built maps.
-- **Block interaction:** Raycasted placement and removal with an 8-block reach, across **254 block types** — stone, deepslate and ore variants, ten wood sets, building blocks, decoration, the nether and copper families, and the full wool, concrete and terracotta palettes.
+- **Block interaction:** Raycasted placement and removal with an 8-block reach, across **277 block types** — stone, deepslate and ore variants, ten wood sets, building blocks, decoration, the nether and copper families, the full wool, concrete and terracotta palettes, and glass.
+- **See-through blocks:** glass, all sixteen stained glass colours, tinted glass, ice and the copper grates, drawn by a second blended pass that leaves the opaque terrain pass untouched — a world without them costs nothing.
 - **Creative block picker:** `E` opens a tabbed window — one page per category plus an "everything" page, scrolled with the wheel. Hover for the block's name, type to search across all categories, click to drop it into the selected hotbar slot.
 - **Walking & flying:** Switch between grounded movement with gravity and collision, and a free-flying mode useful for building or just exploring quickly.
 - **Performance-first rendering:** Render distance is adjustable at runtime (2–96 chunks), chunk geometry is built in background threads so the game never freezes mid-exploration, and frustum culling trims down what actually gets sent to the GPU.

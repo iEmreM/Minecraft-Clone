@@ -53,8 +53,15 @@ class ModernGLRenderer:
         self.shader_manager = ShaderManager(self.ctx)
         self.shader_manager.load_default_shaders()
         
-        # Get chunk shader program
+        # Get chunk shader programs. The two draw the same vertex format with
+        # the same uniforms and differ only in their fragment shader, so every
+        # uniform write below fans out over `chunk_programs` — a uniform written
+        # to one and not the other is how the glass ends up fogged differently
+        # from the wall around it.
         self.chunk_program = self.shader_manager.get_program('chunk')
+        self.chunk_alpha_program = self.shader_manager.get_program('chunk_alpha')
+        self.chunk_programs = tuple(p for p in (self.chunk_program,
+                                                self.chunk_alpha_program) if p)
         
         # Store screen dimensions
         self.width = width
@@ -101,7 +108,7 @@ class ModernGLRenderer:
         came with a module import each time on top of that.
         """
         # The sky gradient goes to every program that has to agree on it.
-        for name in ('chunk', 'water', 'sky'):
+        for name in ('chunk', 'chunk_alpha', 'water', 'sky'):
             program = self.shader_manager.get_program(name)
             if program and 'sky_horizon' in program:
                 program['sky_horizon'].write(self.bg_color)
@@ -110,11 +117,9 @@ class ModernGLRenderer:
         if self.water_surface:
             self.water_surface.upload_static_uniforms()
 
-        if not self.chunk_program:
-            return
-
-        self.chunk_program['m_proj'].write(self.proj_matrix.to_bytes())
-        self.chunk_program['water_line'] = float(WATER_LINE)
+        for program in self.chunk_programs:
+            program['m_proj'].write(self.proj_matrix.to_bytes())
+            program['water_line'] = float(WATER_LINE)
 
     def set_fog_distance(self, view_radius):
         """Fit the fog to how far the world actually loads.
@@ -129,8 +134,8 @@ class ModernGLRenderer:
         self.fog_start = self.fog_end * self.FOG_START_FRACTION
         fog_range = glm.vec2(self.fog_start, self.fog_end)
 
-        if self.chunk_program:
-            self.chunk_program['fog_range'].write(fog_range)
+        for program in self.chunk_programs:
+            program['fog_range'].write(fog_range)
         if self.water_surface:
             self.water_surface.set_fog(fog_range, self.fog_end)
 
@@ -156,22 +161,25 @@ class ModernGLRenderer:
 
         Everything else lives in _upload_static_uniforms.
         """
-        if not self.chunk_program:
-            return
-
         # OPTIMIZATION: m_model removed - shader compiler optimizes it out since unused
         # The vertex shader doesn't use m_model (always identity), so GLSL compiler removes it
-        self.chunk_program['m_view'].write(view_matrix.to_bytes())
         # Eye position for radial fog. Taken from the view matrix rather than
         # added to this method's signature, so no caller can forget to pass it.
         self.cam_pos = glm.vec3(glm.inverse(view_matrix)[3])
-        self.chunk_program['cam_pos'].write(self.cam_pos)
+        view_bytes = view_matrix.to_bytes()
+        for program in self.chunk_programs:
+            program['m_view'].write(view_bytes)
+            program['cam_pos'].write(self.cam_pos)
     
-    def create_vao(self, vertices, indices=None):
+    def create_vao(self, vertices, indices=None, transparent=False):
         """Create a Vertex Array Object from vertex data.
 
         Returns (vao, vbo, ibo). The caller owns all three and must release all
         three — releasing the VAO alone leaves its buffers on the GPU.
+
+        *transparent* picks the see-through program. The vertex format is
+        identical; a VAO is bound to one program, so the chunk's two meshes need
+        one each.
         """
         if vertices.size == 0:
             return None, None, None
@@ -185,7 +193,7 @@ class ModernGLRenderer:
 
         # Updated format: 3f position, 3f tex_coord (vec3), 1f shading
         vao = self.ctx.vertex_array(
-            self.chunk_program,
+            self.chunk_alpha_program if transparent else self.chunk_program,
             [(vbo, '3f 3f 1f', 'in_position', 'in_tex_coord', 'in_shading')],
             ibo)
 
@@ -315,8 +323,8 @@ class ModernGLRenderer:
         """Bind a texture to a texture slot"""
         if texture:
             texture.use(slot)
-            if self.chunk_program:
-                self.chunk_program['u_texture_0'] = slot
+            for program in self.chunk_programs:
+                program['u_texture_0'] = slot
     
     def bind_water_texture(self):
         """Bind water texture for water surface rendering"""
@@ -333,7 +341,7 @@ class ModernGLRenderer:
         Feeding all three from this one call is what stops the clouds inside the
         fog from sliding away from the ones drawn in the sky.
         """
-        for name in ('chunk', 'water'):
+        for name in ('chunk', 'chunk_alpha', 'water'):
             program = self.shader_manager.get_program(name)
             if program and 'u_time' in program:
                 program['u_time'] = time

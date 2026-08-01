@@ -2,6 +2,8 @@ import numpy as np
 from numba import njit
 import math
 
+from world.blocks import BLOCK_DTYPE
+
 # Chunk constants
 CHUNK_SIZE = 16
 CHUNK_HEIGHT = 256
@@ -23,36 +25,46 @@ SEAL_COVER = 8
 # Stand-in for a neighbor chunk that is not loaded. All AIR, so the seam facing
 # it is treated as exposed — the behaviour the mesher had before it knew about
 # neighbors at all. Shared and never written to.
-NO_NEIGHBOR = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=np.uint8)
+NO_NEIGHBOR = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=BLOCK_DTYPE)
 
 # Ceiling on quads per chunk. Generated terrain peaks around 3200, so this is
 # mostly headroom for player-built geometry.
 MAX_FACES = 20000
 
+# The same, for the see-through pass. Nothing in generated terrain is
+# transparent, so every one of those quads is something a player placed: the
+# buffer is sized for a large glass build, not for a whole chunk of it.
+MAX_FACES_ALPHA = 6000
+
 
 def make_mesh_buffers():
     """Scratch space for build_chunk_mesh_fast: one set per meshing thread.
 
-    The builder used to allocate these itself, so every chunk malloc'd and threw
-    away 2.7 MB to fill about 7% of it. Owning them per caller keeps that off
-    the hot path without sharing anything across threads.
+    Four buffers: vertices and indices for the opaque pass, then the same pair
+    for the transparent one. The builder used to allocate these itself, so every
+    chunk malloc'd and threw away 2.7 MB to fill about 7% of it. Owning them per
+    caller keeps that off the hot path without sharing anything across threads.
     """
     return (np.empty(MAX_FACES * 4 * 7, dtype=np.float32),
-            np.empty(MAX_FACES * 6, dtype=np.uint32))
+            np.empty(MAX_FACES * 6, dtype=np.uint32),
+            np.empty(MAX_FACES_ALPHA * 4 * 7, dtype=np.float32),
+            np.empty(MAX_FACES_ALPHA * 6, dtype=np.uint32))
 
 @njit(nogil=True, fastmath=True, cache=True)
-def column_seal_limit(blocks, x, z, cover):
+def column_seal_limit(blocks, opaque, x, z, cover):
     """Highest y in this column that has *cover* solid blocks stacked above it,
     or -1 if the column never gets that deep.
 
     Because the count only ever grows going down, "buried under *cover* blocks"
     is a half-open range, and one number per column describes it. That is what
     lets the mesher seal a neighbor chunk it only ever reads one layer of.
+
+    Only blocks you cannot see through count as cover, so a glass roof does not
+    let the far LOD fill the cave under it back in.
     """
     seen = 0
     for y in range(CHUNK_HEIGHT - 1, -1, -1):
-        block = blocks[x, y, z]
-        if block != AIR and block != WATER:
+        if opaque[blocks[x, y, z]] != 0:
             seen += 1
             if seen == cover:
                 return y - 1
@@ -69,7 +81,7 @@ def buried_to_stone(block, y, limit):
 
 
 @njit(nogil=True, fastmath=True, cache=True)
-def seal_buried_air(blocks, cover):
+def seal_buried_air(blocks, opaque, cover):
     """Fill this chunk's buried air with stone, in place.
 
     Two thirds of a chunk's quads face a cave. None of them can be seen from
@@ -91,7 +103,7 @@ def seal_buried_air(blocks, cover):
     """
     for x in range(CHUNK_SIZE):
         for z in range(CHUNK_SIZE):
-            limit = column_seal_limit(blocks, x, z, cover)
+            limit = column_seal_limit(blocks, opaque, x, z, cover)
             for y in range(limit + 1):
                 block = blocks[x, y, z]
                 if block == AIR or block == WATER:
@@ -99,7 +111,7 @@ def seal_buried_air(blocks, cover):
 
 
 @njit(nogil=True, fastmath=True, cache=True)
-def neighbor_seal_limits(neighbors, cover):
+def neighbor_seal_limits(neighbors, opaque, cover):
     """Seal limits for the one layer of each neighbor the mesher can reach.
 
     The sweep and the AO ring never sample more than a block past the seam, so
@@ -110,10 +122,10 @@ def neighbor_seal_limits(neighbors, cover):
     """
     limits = np.empty((4, CHUNK_SIZE), dtype=np.int32)
     for i in range(CHUNK_SIZE):
-        limits[0, i] = column_seal_limit(neighbors[0], CHUNK_SIZE - 1, i, cover)
-        limits[1, i] = column_seal_limit(neighbors[1], 0, i, cover)
-        limits[2, i] = column_seal_limit(neighbors[2], i, CHUNK_SIZE - 1, cover)
-        limits[3, i] = column_seal_limit(neighbors[3], i, 0, cover)
+        limits[0, i] = column_seal_limit(neighbors[0], opaque, CHUNK_SIZE - 1, i, cover)
+        limits[1, i] = column_seal_limit(neighbors[1], opaque, 0, i, cover)
+        limits[2, i] = column_seal_limit(neighbors[2], opaque, i, CHUNK_SIZE - 1, cover)
+        limits[3, i] = column_seal_limit(neighbors[3], opaque, i, 0, cover)
     return limits
 
 
@@ -166,11 +178,12 @@ AO_LEVELS = (0.45, 0.59, 0.71, 0.80)
 AO_FULL = 0b11111111
 
 @njit(nogil=True, fastmath=True, cache=True)
-def get_face_ao(blocks, neighbors, nlimits, x, y, z, face_id):
+def get_face_ao(blocks, neighbors, nlimits, opaque, x, y, z, face_id):
     """Per-corner ambient occlusion for one block face, packed into an int.
 
     Returns the four corner levels (0 = wedged into a corner, 3 = open sky) at
-    2 bits each, in the vertex order emit_greedy_quad writes them.
+    2 bits each, in the vertex order emit_greedy_quad writes them. Only opaque
+    neighbors occlude — a pane of glass beside a floor must not darken it.
 
     Packing them into a single int is what lets the greedy pass compare two
     faces' shading with one ==, so blocks whose corners are lit differently are
@@ -223,15 +236,15 @@ def get_face_ao(blocks, neighbors, nlimits, x, y, z, face_id):
     by = y + ny
     bz = z + nz
 
-    s_um = get_block_ext(blocks, neighbors, nlimits, bx - ux, by - uy, bz - uz) != AIR
-    s_up = get_block_ext(blocks, neighbors, nlimits, bx + ux, by + uy, bz + uz) != AIR
-    s_vm = get_block_ext(blocks, neighbors, nlimits, bx - vx, by - vy, bz - vz) != AIR
-    s_vp = get_block_ext(blocks, neighbors, nlimits, bx + vx, by + vy, bz + vz) != AIR
+    s_um = opaque[get_block_ext(blocks, neighbors, nlimits, bx - ux, by - uy, bz - uz)] != 0
+    s_up = opaque[get_block_ext(blocks, neighbors, nlimits, bx + ux, by + uy, bz + uz)] != 0
+    s_vm = opaque[get_block_ext(blocks, neighbors, nlimits, bx - vx, by - vy, bz - vz)] != 0
+    s_vp = opaque[get_block_ext(blocks, neighbors, nlimits, bx + vx, by + vy, bz + vz)] != 0
 
-    c_mm = get_block_ext(blocks, neighbors, nlimits, bx - ux - vx, by - uy - vy, bz - uz - vz) != AIR
-    c_pm = get_block_ext(blocks, neighbors, nlimits, bx + ux - vx, by + uy - vy, bz + uz - vz) != AIR
-    c_mp = get_block_ext(blocks, neighbors, nlimits, bx - ux + vx, by - uy + vy, bz - uz + vz) != AIR
-    c_pp = get_block_ext(blocks, neighbors, nlimits, bx + ux + vx, by + uy + vy, bz + uz + vz) != AIR
+    c_mm = opaque[get_block_ext(blocks, neighbors, nlimits, bx - ux - vx, by - uy - vy, bz - uz - vz)] != 0
+    c_pm = opaque[get_block_ext(blocks, neighbors, nlimits, bx + ux - vx, by + uy - vy, bz + uz - vz)] != 0
+    c_mp = opaque[get_block_ext(blocks, neighbors, nlimits, bx - ux + vx, by - uy + vy, bz - uz + vz)] != 0
+    c_pp = opaque[get_block_ext(blocks, neighbors, nlimits, bx + ux + vx, by + uy + vy, bz + uz + vz)] != 0
 
     code = 0
     for i in range(4):
@@ -370,19 +383,32 @@ def emit_greedy_quad(vertices, offset, chunk_x, chunk_z, x, y, z, width, height,
         vertices[base+6] = shading * AO_LEVELS[(ao_code >> (2 * i)) & 3]
 
 @njit(nogil=True, fastmath=True, cache=True)
-def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices, face_layers, lod=0):
+def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices,
+                          t_vertices, t_indices, face_layers, opaque, lod=0):
     """
     Fast chunk mesh builder using Greedy Meshing (Texture Array version)
 
     *neighbors* is the (-X, +X, -Z, +Z) tuple of neighbor block arrays; see
     get_block_ext. Pass NO_NEIGHBOR for any chunk that is not loaded.
 
-    *face_layers* is blocks.FACE_LAYER, passed straight through to
-    emit_greedy_quad — see there for why it is not a global.
+    *face_layers* is blocks.FACE_LAYER and *opaque* is blocks.OPAQUE, both
+    passed as arguments rather than read as globals — see emit_greedy_quad.
 
-    *vertices* and *indices* are reusable scratch space from make_mesh_buffers;
-    the caller keeps one set per meshing thread. Returns fresh right-sized
-    copies of the part that was filled, so the scratch is free again on return.
+    The four scratch buffers come from make_mesh_buffers, one set per meshing
+    thread. Returns right-sized copies of the filled part of each, so the
+    scratch is free again on return: `(vertices, indices, t_vertices,
+    t_indices)`, the second pair being the see-through blocks.
+
+    **The two meshes are built in one sweep, not two.** A quad's pass is decided
+    by `opaque[block_type]` at the moment it is emitted, and since a greedy run
+    only ever merges one block type, a run is entirely one or entirely the
+    other. That is why adding transparency costs the mesher nothing on terrain
+    that has none — the second buffer simply stays empty.
+
+    A face is emitted when the block on the other side cannot hide it:
+    `opaque[neighbor] == 0`. A see-through block additionally drops the face it
+    shares with its own kind, so a wall of glass is a pane, not a stack of
+    boxes.
 
     *lod* drops work as the chunk gets further from the player. **Neither level
     moves a surface**: the outline against the sky, every slope and every tree
@@ -417,15 +443,18 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices
         # anyway, which is what this thread wants while the main thread may be
         # swapping a player edit in underneath it.
         blocks = blocks.copy()
-        seal_buried_air(blocks, SEAL_COVER)
-        nlimits = neighbor_seal_limits(neighbors, SEAL_COVER)
+        seal_buried_air(blocks, opaque, SEAL_COVER)
+        nlimits = neighbor_seal_limits(neighbors, opaque, SEAL_COVER)
     else:
         nlimits = np.full((4, CHUNK_SIZE), -1, dtype=np.int32)
 
     max_vertices = MAX_FACES * 4
+    max_t_vertices = MAX_FACES_ALPHA * 4
 
     vertex_count = 0
     index_count = 0
+    t_vertex_count = 0
+    t_index_count = 0
     # Numba compiles with boundscheck off, so running past the scratch buffer
     # would silently write into whatever follows it — and the buffer is reused
     # by the next chunk. Stop instead; the chunk loses its furthest faces, which
@@ -484,7 +513,7 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices
                         x, y, z = u, v, d
                     
                     block_type = blocks[x, y, z]
-                    
+
                     if block_type != AIR and block_type != WATER:
                         nx, ny, nz = x, y, z
                         if d_axis == 0: nx += direction
@@ -494,14 +523,17 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices
                         # Looks into the neighbor chunk on the seams, so a face
                         # covered by the chunk next door is no longer emitted.
                         neighbor_type = get_block_ext(blocks, neighbors, nlimits, nx, ny, nz)
-                        if neighbor_type == AIR or neighbor_type == WATER:
+                        # Exposed unless the neighbor can hide it — and a
+                        # see-through block also hides its own kind, so the
+                        # inside of a glass wall is not drawn.
+                        if opaque[neighbor_type] == 0 and neighbor_type != block_type:
                             mask[u, v] = block_type
                             # Flat shading past the near LOD: sampling AO costs
                             # 8 lookups a face, and — the real win — a run only
                             # merges while the AO code matches, so a uniform
                             # code lets the greedy pass swallow whole hillsides.
                             if use_ao:
-                                mask_ao[u, v] = get_face_ao(blocks, neighbors, nlimits, x, y, z, face_id)
+                                mask_ao[u, v] = get_face_ao(blocks, neighbors, nlimits, opaque, x, y, z, face_id)
                             else:
                                 mask_ao[u, v] = AO_FULL
             
@@ -512,9 +544,15 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices
                 u = 0
                 while u < dims[u_axis]:
                     if mask[u, v] != 0:
-                        if vertex_count + 4 > max_vertices:
+                        see_through = opaque[mask[u, v]] == 0
+                        if not see_through and vertex_count + 4 > max_vertices:
                             overflow = True
                             break
+                        # A full see-through buffer drops its own quads and lets
+                        # the sweep carry on. Stopping the whole chunk instead
+                        # would trade a wall of glass for a hole in the terrain,
+                        # and the glass buffer is the small one.
+                        drop = see_through and t_vertex_count + 4 > max_t_vertices
 
                         block_type = mask[u, v]
                         ao_code = mask_ao[u, v]
@@ -542,37 +580,49 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices
                         else:
                             q_x, q_y, q_z = u, v, d
                         
-                        emit_greedy_quad(vertices, vertex_count * 7, chunk_x, chunk_z,
-                                         q_x, q_y, q_z, width, height, face_id,
-                                         block_type, ao_code, face_layers)
+                        if not drop:
+                            # Same geometry either way; only which buffer it
+                            # lands in differs, and that is what keeps the
+                            # opaque pass free of anything to blend or discard.
+                            out_v = t_vertices if see_through else vertices
+                            out_i = t_indices if see_through else indices
+                            start_v = t_vertex_count if see_through else vertex_count
+                            at_i = t_index_count if see_through else index_count
 
-                        # Split the quad along its brighter diagonal. Cutting
-                        # across the dark one smears a single dark corner over
-                        # half the face.
-                        ao_0 = ao_code & 3
-                        ao_1 = (ao_code >> 2) & 3
-                        ao_2 = (ao_code >> 4) & 3
-                        ao_3 = (ao_code >> 6) & 3
+                            emit_greedy_quad(out_v, start_v * 7, chunk_x, chunk_z,
+                                             q_x, q_y, q_z, width, height, face_id,
+                                             block_type, ao_code, face_layers)
 
-                        start_v = vertex_count
-                        if ao_0 + ao_2 >= ao_1 + ao_3:
-                            indices[index_count] = start_v
-                            indices[index_count+1] = start_v + 1
-                            indices[index_count+2] = start_v + 2
-                            indices[index_count+3] = start_v
-                            indices[index_count+4] = start_v + 2
-                            indices[index_count+5] = start_v + 3
-                        else:
-                            indices[index_count] = start_v + 1
-                            indices[index_count+1] = start_v + 2
-                            indices[index_count+2] = start_v + 3
-                            indices[index_count+3] = start_v + 1
-                            indices[index_count+4] = start_v + 3
-                            indices[index_count+5] = start_v
-                        
-                        vertex_count += 4
-                        index_count += 6
-                        
+                            # Split the quad along its brighter diagonal. Cutting
+                            # across the dark one smears a single dark corner over
+                            # half the face.
+                            ao_0 = ao_code & 3
+                            ao_1 = (ao_code >> 2) & 3
+                            ao_2 = (ao_code >> 4) & 3
+                            ao_3 = (ao_code >> 6) & 3
+
+                            if ao_0 + ao_2 >= ao_1 + ao_3:
+                                out_i[at_i] = start_v
+                                out_i[at_i+1] = start_v + 1
+                                out_i[at_i+2] = start_v + 2
+                                out_i[at_i+3] = start_v
+                                out_i[at_i+4] = start_v + 2
+                                out_i[at_i+5] = start_v + 3
+                            else:
+                                out_i[at_i] = start_v + 1
+                                out_i[at_i+1] = start_v + 2
+                                out_i[at_i+2] = start_v + 3
+                                out_i[at_i+3] = start_v + 1
+                                out_i[at_i+4] = start_v + 3
+                                out_i[at_i+5] = start_v
+
+                            if see_through:
+                                t_vertex_count += 4
+                                t_index_count += 6
+                            else:
+                                vertex_count += 4
+                                index_count += 6
+
                         for h in range(height):
                             for w in range(width):
                                 mask[u + w, v + h] = 0
@@ -582,4 +632,5 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices
 
     # Copies, not views: the scratch buffer is about to be reused, and a view
     # would also pin all 2.7 MB of it for as long as the mesh sits in a queue.
-    return vertices[:vertex_count*7].copy(), indices[:index_count].copy()
+    return (vertices[:vertex_count*7].copy(), indices[:index_count].copy(),
+            t_vertices[:t_vertex_count*7].copy(), t_indices[:t_index_count].copy())

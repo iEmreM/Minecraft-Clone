@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from world.blocks import FACE_LAYER
+from world.blocks import BLOCK_DTYPE, FACE_LAYER, OPAQUE
 from world.fast_builder import (AIR, SEAL_COVER, STONE, WATER,
                                 build_chunk_mesh_fast, column_seal_limit,
                                 make_mesh_buffers, seal_buried_air)
@@ -32,7 +32,7 @@ def build_patch():
     chunks = {}
     for chunk_x in range(PATCH):
         for chunk_z in range(PATCH):
-            blocks = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=np.uint8)
+            blocks = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=BLOCK_DTYPE)
             terrain_generator.generate_chunk_terrain(chunk_x, chunk_z, blocks)
             chunks[(chunk_x, chunk_z)] = blocks
     return chunks
@@ -50,7 +50,7 @@ def solid(blocks):
 def check_seal_only_adds(blocks):
     """Air may become stone. Nothing else may change."""
     sealed = blocks.copy()
-    seal_buried_air(sealed, SEAL_COVER)
+    seal_buried_air(sealed, OPAQUE, SEAL_COVER)
 
     was_solid = solid(blocks)
     assert np.array_equal(sealed[was_solid], blocks[was_solid]), \
@@ -67,7 +67,7 @@ def check_silhouette_is_kept(blocks):
         return np.where(s.any(axis=1), CHUNK_HEIGHT - 1 - np.argmax(s[:, ::-1, :], axis=1), -1)
 
     sealed = blocks.copy()
-    seal_buried_air(sealed, SEAL_COVER)
+    seal_buried_air(sealed, OPAQUE, SEAL_COVER)
     assert np.array_equal(tops(blocks), tops(sealed)), \
         "a column's highest block moved — the outline against the sky would shift"
 
@@ -79,7 +79,7 @@ def check_trees_survive(chunks):
     tree_blocks = 0
     for blocks in chunks.values():
         sealed = blocks.copy()
-        seal_buried_air(sealed, SEAL_COVER)
+        seal_buried_air(sealed, OPAQUE, SEAL_COVER)
         tree = (blocks == LEAVES) | (blocks == WOOD)
         tree_blocks += int(tree.sum())
         # air that got filled and has a tree block directly above it
@@ -93,13 +93,13 @@ def check_trees_survive(chunks):
 
 def check_column_limit_counts_cover():
     """The limit is 'this many solid blocks above', not 'this far below the top'."""
-    blocks = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=np.uint8)
+    blocks = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=BLOCK_DTYPE)
     blocks[0, 40:40 + SEAL_COVER, 0] = STONE
-    assert column_seal_limit(blocks, 0, 0, SEAL_COVER) == 39, \
+    assert column_seal_limit(blocks, OPAQUE, 0, 0, SEAL_COVER) == 39, \
         "limit should sit directly under the last of the covering blocks"
 
     blocks[0, 40 + SEAL_COVER - 1, 0] = AIR          # one short of the cover
-    assert column_seal_limit(blocks, 0, 0, SEAL_COVER) == -1, \
+    assert column_seal_limit(blocks, OPAQUE, 0, 0, SEAL_COVER) == -1, \
         "a column that never reaches the cover must seal nothing"
 
 
@@ -129,15 +129,16 @@ def main():
     quads_by_lod = {}
     for lod in (0, 1, 2):
         build_chunk_mesh_fast(chunks[(1, 1)], 1, 1, neighbors_of(chunks, 1, 1),
-                              buffers[0], buffers[1], FACE_LAYER, lod)   # warm the JIT
+                              *buffers, FACE_LAYER, OPAQUE, lod)   # warm the JIT
 
         quads = triangles = 0
         started = time.perf_counter()
         for chunk_x, chunk_z in inner:
-            vertices, indices = build_chunk_mesh_fast(
+            vertices, indices, t_vertices, t_indices = build_chunk_mesh_fast(
                 chunks[(chunk_x, chunk_z)], chunk_x, chunk_z,
-                neighbors_of(chunks, chunk_x, chunk_z), buffers[0], buffers[1],
-                FACE_LAYER, lod)
+                neighbors_of(chunks, chunk_x, chunk_z), *buffers,
+                FACE_LAYER, OPAQUE, lod)
+            assert len(t_vertices) == 0, "generated terrain has no see-through blocks"
             quads += len(vertices) // 28
             triangles += len(indices) // 3
             check_footprint(vertices, chunk_x, chunk_z, lod)

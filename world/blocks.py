@@ -18,6 +18,10 @@ and committed — the game never reads `referans/` at runtime.
 
 import numpy as np
 
+# What ModernChunk.blocks is made of. See the note beside the ID assert at the
+# bottom of this file for what widening it past 8 bits cost.
+BLOCK_DTYPE = np.uint16
+
 # Face order, fixed by fast_builder.emit_greedy_quad. `front` is the +Z face; we
 # have no per-block rotation, so a furnace always faces the same way.
 TOP, BOTTOM, FRONT, BACK, RIGHT, LEFT = range(6)
@@ -361,6 +365,37 @@ _TABLE = [
                 'ancient_debris_top')),
         (255, 'Crying Obsidian', 'crying_obsidian'),
     ]),
+    # Every block in this group is see-through, and that is not a cosmetic
+    # label: TRANSPARENT below is built from it, the mesher routes their quads
+    # into a second buffer, render_chunks draws that buffer in a blended pass
+    # after the opaque one, and build_atlas.py keeps their alpha instead of
+    # flattening it. Adding a see-through block anywhere else in this table
+    # would draw it as an opaque block with a muddy texture.
+    ('Şeffaf', [
+        (256, 'Glass', 'glass'),
+        (257, 'Tinted Glass', 'tinted_glass'),
+        (258, 'Ice', 'ice'),
+        (259, 'White Stained Glass', 'white_stained_glass'),
+        (260, 'Light Gray Stained Glass', 'light_gray_stained_glass'),
+        (261, 'Gray Stained Glass', 'gray_stained_glass'),
+        (262, 'Black Stained Glass', 'black_stained_glass'),
+        (263, 'Brown Stained Glass', 'brown_stained_glass'),
+        (264, 'Red Stained Glass', 'red_stained_glass'),
+        (265, 'Orange Stained Glass', 'orange_stained_glass'),
+        (266, 'Yellow Stained Glass', 'yellow_stained_glass'),
+        (267, 'Lime Stained Glass', 'lime_stained_glass'),
+        (268, 'Green Stained Glass', 'green_stained_glass'),
+        (269, 'Cyan Stained Glass', 'cyan_stained_glass'),
+        (270, 'Light Blue Stained Glass', 'light_blue_stained_glass'),
+        (271, 'Blue Stained Glass', 'blue_stained_glass'),
+        (272, 'Purple Stained Glass', 'purple_stained_glass'),
+        (273, 'Magenta Stained Glass', 'magenta_stained_glass'),
+        (274, 'Pink Stained Glass', 'pink_stained_glass'),
+        (275, 'Copper Grate', 'copper_grate'),
+        (276, 'Exposed Copper Grate', 'exposed_copper_grate'),
+        (277, 'Weathered Copper Grate', 'weathered_copper_grate'),
+        (278, 'Oxidized Copper Grate', 'oxidized_copper_grate'),
+    ]),
 ]
 
 
@@ -384,6 +419,10 @@ def _expand(textures):
 GROUPS = [(name, [b[0] for b in rows]) for name, rows in _TABLE]
 BLOCK_NAMES = {bid: name for _, rows in _TABLE for bid, name, _ in rows}
 BLOCK_FACES = {bid: _expand(tex) for _, rows in _TABLE for bid, _, tex in rows}
+
+# The blocks you can see through, and the one place that says so.
+TRANSPARENT = frozenset(bid for name, ids in GROUPS if name == 'Şeffaf' for bid in ids)
+assert TRANSPARENT, 'the Şeffaf group is what defines the transparent blocks'
 
 # Every block a player can pick, in the order the creative window lists them.
 CREATIVE = [bid for _, ids in GROUPS for bid in ids]
@@ -409,6 +448,19 @@ for _bid, _faces in BLOCK_FACES.items():
 # as the block on a flat icon.
 ICON_LAYER = {bid: int(FACE_LAYER[bid, FRONT]) for bid in BLOCK_FACES}
 
+# Can this block hide the face of the block behind it? The mesher asks that of
+# every neighbor, so it is a table lookup rather than a chain of comparisons.
+# AIR and WATER never could; the see-through blocks cannot either, which is what
+# keeps the terrain behind a glass wall meshed.
+#
+# Passed into build_chunk_mesh_fast as an argument for the same reason
+# FACE_LAYER is — @njit(cache=True) freezes globals into the cached artifact.
+OPAQUE = np.ones(max(BLOCK_NAMES) + 1, dtype=np.uint8)
+OPAQUE[0] = 0                       # AIR
+OPAQUE[8] = 0                       # WATER — never meshed, see fast_builder
+for _bid in TRANSPARENT:
+    OPAQUE[_bid] = 0
+
 HOTBAR_DEFAULT = [1, 2, 3, 4, 9, 10, 44, 7, 6]
 
 # IDs 1-10 are written into every generated chunk by terrain_generator and into
@@ -420,9 +472,14 @@ assert all(BLOCK_NAMES.get(k) == v for k, v in _LEGACY.items()), \
     'legacy block IDs 1-10 changed meaning; terrain and saved chunks depend on them'
 assert 8 not in BLOCK_NAMES, 'ID 8 is WATER — never meshed, keep it out of the table'
 
-# ModernChunk.blocks is uint8, so 255 is the hard ceiling on block types and the
-# table is full. Widening it to uint16 doubles the largest allocation in the game
-# (64 KB -> 128 KB per chunk, times an unevicted chunk_cache), so the next block
-# to be added should replace one here rather than grow the type.
-assert max(BLOCK_NAMES) <= 255, \
-    'block IDs must fit uint8 — ModernChunk.blocks and every cached chunk are uint8'
+# ModernChunk.blocks was uint8 until the see-through blocks needed IDs and 255
+# was already taken. Widening it to uint16 doubles the largest allocation in the
+# game — 64 KB -> 128 KB per chunk — and that is the entire price; measured, the
+# mesher does not notice (0.561 -> 0.559 ms/chunk at lod 0, 0.482 -> 0.483 for
+# terrain generation), because the part of the array a chunk actually touches is
+# the ~40 populated levels, a few KB either way. Memory is ~7 MB more at render
+# distance 6 and ~28 MB at 12, and P2-5 already stopped the cache from keeping
+# untouched chunks. If block IDs ever pass 65535, the answer is a palette per
+# chunk (referans.md §5.2, PalettedContainer), not uint32.
+assert max(BLOCK_NAMES) < np.iinfo(BLOCK_DTYPE).max, \
+    f'block IDs must fit {np.dtype(BLOCK_DTYPE).name} — ModernChunk.blocks is that type'

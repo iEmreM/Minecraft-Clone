@@ -46,4 +46,10 @@ class ShaderManager:
     def load_default_shaders(self):
         """Load the default shaders"""
         self.load_shader('chunk', 'shaders/chunk.vert', 'shaders/chunk.frag')
+        # Same vertex shader, same vertex format: the see-through blocks differ
+        # only in that their fragment shader keeps the texture's alpha and
+        # discards the fully clear texels. Keeping it a separate program is what
+        # lets `chunk.frag` stay free of `discard`, which would cost the whole
+        # terrain pass its early-Z.
+        self.load_shader('chunk_alpha', 'shaders/chunk.vert', 'shaders/chunk_alpha.frag')
         self.load_shader('water', 'shaders/water.vert', 'shaders/water.frag')
