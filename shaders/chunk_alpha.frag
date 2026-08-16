@@ -13,7 +13,7 @@
 // because it covers a few windows rather than the whole world.
 
 void main() {
-    vec4 texel = texture(u_texture_0, uv);
+    vec4 texel = sample_nearest(uv);
     if (texel.a < 0.02) {
         discard;                 // a hole in the glass, not a faint pane
     }

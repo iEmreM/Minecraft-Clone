@@ -22,18 +22,38 @@ from world.blocks import BLOCK_DTYPE, FACE_LAYER, OPAQUE
 from world.fast_builder import (AIR, SEAL_COVER, STONE, WATER,
                                 build_chunk_mesh_fast, column_seal_limit,
                                 make_mesh_buffers, seal_buried_air)
-from world.modern_chunk import CHUNK_HEIGHT, CHUNK_SIZE, LEAVES, WOOD
-from world.terrain_generator import terrain_generator
+from world.modern_chunk import CHUNK_HEIGHT, CHUNK_SIZE
+from world.terrain_generator import B_TREES, column_biome, terrain_generator
 
 PATCH = 5   # chunks per side; the middle ones get real neighbors
 
+# Every log and leaf in the block table. The canopy check counts these, and it
+# is only meaningful over a patch that has some — which is why the patch below
+# is searched for rather than written down: which chunks are forest moves every
+# time the terrain is retuned.
+TREE_BLOCKS = (7, 38, 39, 40, 41, 42, 43, 127, 133, 134,
+               6, 54, 55, 56, 57, 58, 147, 148, 149, 150)
+
 
 def build_patch():
+    origin = (0, 0)
+    for chunk_x in range(0, 160, 6):
+        for chunk_z in range(0, 160, 6):
+            if all(B_TREES[column_biome(x * CHUNK_SIZE + 8, z * CHUNK_SIZE + 8)] > 280
+                   for x in range(chunk_x, chunk_x + PATCH)
+                   for z in range(chunk_z, chunk_z + PATCH)):
+                origin = (chunk_x, chunk_z)
+                break
+        else:
+            continue
+        break
+
     chunks = {}
     for chunk_x in range(PATCH):
         for chunk_z in range(PATCH):
             blocks = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=BLOCK_DTYPE)
-            terrain_generator.generate_chunk_terrain(chunk_x, chunk_z, blocks)
+            terrain_generator.generate_chunk_terrain(origin[0] + chunk_x,
+                                                     origin[1] + chunk_z, blocks)
             chunks[(chunk_x, chunk_z)] = blocks
     return chunks
 
@@ -80,7 +100,7 @@ def check_trees_survive(chunks):
     for blocks in chunks.values():
         sealed = blocks.copy()
         seal_buried_air(sealed, OPAQUE, SEAL_COVER)
-        tree = (blocks == LEAVES) | (blocks == WOOD)
+        tree = np.isin(blocks, TREE_BLOCKS)
         tree_blocks += int(tree.sum())
         # air that got filled and has a tree block directly above it
         filled = (blocks == AIR) & (sealed == STONE)

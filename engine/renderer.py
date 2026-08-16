@@ -246,15 +246,24 @@ class ModernGLRenderer:
             # texel, i.e. inside ~10 blocks — but a 16x16 tile crosses that
             # line at ~39 blocks, so the whole near field went soft.
             #
-            # Nearest inside a mip level keeps the blocky look up close;
-            # blending *between* levels removes the band that used to sweep
-            # across the ground as you walk. Anisotropy is what actually
-            # matters at distance: a chunk seen at a grazing angle is minified
-            # far harder along one axis than the other, and an isotropic
-            # sampler has to pick the blurrier of the two for both, which is
-            # what turns distant ground into mush. The driver clamps the 16 to
-            # whatever it supports.
-            texture_array.filter = (mgl.NEAREST_MIPMAP_LINEAR, mgl.NEAREST)
+            # Magnification is LINEAR because the *shader* does the nearest
+            # snap now (`sample_nearest` in chunk_common.glsl, the reference's
+            # terrain.fsh). A NEAREST sampler put the boundary between two
+            # texels wholly inside one pixel, so walking made it jump a pixel
+            # at a time across every repeating surface at once — the crawling
+            # the blocky look was costing us. The shader lands on the same
+            # texel centres and uses this bilinear tap only to resolve the last
+            # screen pixel of the edge, so blocks stay hard and stop shimmering.
+            # The HUD binds its own NEAREST sampler over this texture: an icon
+            # is magnified with no derivatives to speak of and there LINEAR is
+            # only blur.
+            #
+            # Anisotropy is what matters at distance: a chunk seen at a grazing
+            # angle is minified far harder along one axis than the other, and an
+            # isotropic sampler has to pick the blurrier of the two for both,
+            # which is what turns distant ground into mush. The driver clamps
+            # the 16 to whatever it supports.
+            texture_array.filter = (mgl.LINEAR_MIPMAP_LINEAR, mgl.LINEAR)
             texture_array.anisotropy = 16.0
 
 

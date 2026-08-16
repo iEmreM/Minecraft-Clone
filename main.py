@@ -6,6 +6,7 @@ from engine.camera import Camera
 from world.modern_chunk import AIR, GRASS
 from world.blocks import BLOCK_NAMES
 from world.threaded_chunk_manager import ThreadedChunkManager
+from world.terrain_generator import find_spawn
 import glm
 import math
 from engine.hud import HUDRenderer, HOTBAR_SLOTS
@@ -16,8 +17,10 @@ class MinecraftModernGL:
         # Initialize renderer
         self.renderer = ModernGLRenderer(width, height)
         
-        # Initialize camera - position it above the terrain 
-        self.camera = Camera(position=(8, 40, 8))
+        # Initialize camera on the first dry column out from the origin. A fixed
+        # spawn height puts the player inside a mountain or on a sea bed as soon
+        # as the terrain has either.
+        self.camera = Camera(position=find_spawn())
         
         # Game state
         self.running = True

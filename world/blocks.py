@@ -205,6 +205,12 @@ _TABLE = [
         (149, 'Pale Oak Leaves', 'pale_oak_leaves'),
         (150, 'Azalea Leaves', 'azalea_leaves'),
         (314, 'Flowering Azalea Leaves', 'flowering_azalea_leaves'),
+        # Snow settles on whatever faces up, which for a canopy is its leaves.
+        # The real game stacks a snow layer block on top; we have no thin
+        # blocks, so the snow lives on the leaf's top face — the same trick
+        # `grass_block_snow` uses there. Only the exposed tops of a canopy show
+        # it, which is exactly where snow would be.
+        (359, 'Snowy Spruce Leaves', ('snow', 'spruce_leaves', 'spruce_leaves')),
     ]),
     ('Cevher', [
         (59, 'Coal Ore', 'coal_ore'),
@@ -562,6 +568,10 @@ OPAQUE[0] = 0                       # AIR
 OPAQUE[8] = 0                       # WATER — never meshed, see fast_builder
 for _bid in TRANSPARENT:
     OPAQUE[_bid] = 0
+
+# Water has no row in the table (it is never meshed — see fast_builder), but the
+# id is needed outside terrain generation: the player walks through it.
+WATER = 8
 
 HOTBAR_DEFAULT = [1, 2, 3, 4, 9, 10, 44, 7, 6]
 

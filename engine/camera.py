@@ -1,6 +1,19 @@
 import glm
 import math
 
+from world.blocks import WATER
+
+
+def _solid(block):
+    """Whether a block stops the player.
+
+    Only AIR and WATER let them through — glass is see-through, not walk-through.
+    Water became a real block when the terrain generator started filling the sea
+    instead of leaving a dry basin under the water plane; before that every
+    `!= 0` in here was equivalent.
+    """
+    return block != 0 and block != WATER
+
 
 class Camera:
     # Skin width for the collision box. Large enough to absorb the float noise
@@ -140,11 +153,11 @@ class Camera:
                 box['z1'] < block_z + 1 and box['z2'] > block_z)
 
     def _box_hits_block(self, bbox):
-        """True if any non-air block overlaps *bbox*."""
+        """True if any solid block overlaps *bbox*."""
         for block_x in range(int(math.floor(bbox['x1'])), int(math.floor(bbox['x2'])) + 1):
             for block_y in range(int(math.floor(bbox['y1'])), int(math.floor(bbox['y2'])) + 1):
                 for block_z in range(int(math.floor(bbox['z1'])), int(math.floor(bbox['z2'])) + 1):
-                    if self.world.get_block_at(block_x, block_y, block_z) != 0:
+                    if _solid(self.world.get_block_at(block_x, block_y, block_z)):
                         return True
         return False
 
@@ -178,7 +191,7 @@ class Camera:
         check_y = int(math.floor(bbox['y1']))
         for block_x in range(int(math.floor(bbox['x1'])), int(math.floor(bbox['x2'])) + 1):
             for block_z in range(int(math.floor(bbox['z1'])), int(math.floor(bbox['z2'])) + 1):
-                if self.world.get_block_at(block_x, check_y, block_z) != 0:
+                if _solid(self.world.get_block_at(block_x, check_y, block_z)):
                     return True
 
         return False

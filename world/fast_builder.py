@@ -15,9 +15,12 @@ WATER = 8
 # LOD treats it as out of sight and fills it back in. See seal_buried_air.
 #
 # 8 sits in a wide gap. Above it: the terrain generator only carves caves below
-# `terrain_height - 10`, so every cave is under a crust at least that thick and
-# every cave is caught. Below it: the thickest thing that legitimately has air
-# under it is a tree, and a canopy is 4 leaf layers. Measured on 225 chunks,
+# `terrain_height - CAVE_ROOF` (9), so every cave is under a crust at least that
+# thick and every cave is caught — `test_worldgen.py` asserts that relation from
+# the other side, because a cave allowed nearer the surface would be filled in
+# here and a cave mouth would close as the player walked away. Below it: the
+# thickest thing that legitimately has air under it is a tree canopy, and a
+# village roof is thinner still. Measured on 225 chunks,
 # raising the number to 4 changes the quad count by 0.2% and lowering it to 16
 # gives up half the saving — the terrain is not close to either edge.
 SEAL_COVER = 8

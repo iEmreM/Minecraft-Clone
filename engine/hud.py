@@ -155,6 +155,15 @@ class HUDRenderer:
         self.text_prog = ctx.program(
             vertex_shader=_VERT_TEXT, fragment_shader=_FRAG_TEXT)
 
+        # The block texture array is shared with the terrain pass, which needs
+        # LINEAR magnification for the shader-side nearest snap that stops
+        # distant blocks crawling. An icon has no such derivatives — it is a
+        # 16px tile blown up 3x on a flat quad — so LINEAR there is only blur.
+        # A sampler object overrides the texture's own filter for as long as it
+        # is bound, which is the one way to disagree without mutating shared
+        # state and having to remember to put it back.
+        self._icon_sampler = ctx.sampler(filter=(mgl.NEAREST, mgl.NEAREST))
+
         pg.font.init()
 
         # Hotbar contents are mutable now: the creative window writes into them.
@@ -740,8 +749,10 @@ class HUDRenderer:
             self._cell_vao.render(mgl.TRIANGLES, vertices=self._cell_count)
         if block_texture_array and self._inv_icon_count:
             block_texture_array.use(0)
+            self._icon_sampler.use(0)
             self.tex_prog['u_tex'].value = 0
             self._inv_icon_vao.render(mgl.TRIANGLES, vertices=self._inv_icon_count)
+            self._icon_sampler.clear(0)
         self._header.draw(self.text_prog)
         ctx.scissor = None
 
@@ -805,8 +816,10 @@ class HUDRenderer:
 
         if block_texture_array:
             block_texture_array.use(0)
+            self._icon_sampler.use(0)
             self.tex_prog['u_tex'].value = 0
             self._icon_vao.render(mgl.TRIANGLES, vertices=self._icon_count)
+            self._icon_sampler.clear(0)
 
         # Restore state
         ctx.enable(mgl.DEPTH_TEST)

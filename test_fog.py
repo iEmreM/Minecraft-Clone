@@ -1,6 +1,6 @@
-"""Fog self-check: renders the real chunk/sky/water shaders offscreen.
+"""Chunk/sky/water shader self-check: renders the real shaders offscreen.
 
-Guards three things that fail as "looks wrong" rather than as an exception:
+Guards four things that fail as "looks wrong" rather than as an exception:
 
   * fog is radial — turning the camera must not change how fogged a fixed piece
     of terrain is. With the old gl_FragCoord.z/w depth fog it thinned out by
@@ -9,6 +9,9 @@ Guards three things that fail as "looks wrong" rather than as an exception:
   * fully fogged terrain is *exactly* the sky along the same ray — the whole
     sky, clouds and sun included, not just the gradient. Otherwise a fogged
     mountain shows up as a sky-blue hole cutting through a cloud.
+  * a magnified block is still hard-edged. The sampler filters linearly now, so
+    the blocky look is the shader's `sample_nearest` and nothing else; drop it
+    and every texture in the world goes soft.
 
 Run: python test_fog.py
 """
@@ -147,6 +150,62 @@ def _render_sky(ctx, prog, fbo, yaw_deg, look_dir=None):
     vao.release()
 
 
+# A fragment shader that samples the way the terrain used to: straight
+# `texture()`, letting the sampler magnify. It exists to be *worse* — the
+# sharpness check below is only meaningful against something that fails it.
+# Every uniform _draw_terrain writes is referenced so the program keeps them.
+_FRAG_PLAIN = """#version 330 core
+in vec3 uv;
+in float shading;
+in vec3 frag_world_pos;
+uniform sampler2DArray u_texture_0;
+uniform float water_line;
+uniform vec2 fog_range;
+uniform vec3 cam_pos;
+uniform vec3 sky_horizon;
+uniform vec3 sky_zenith;
+uniform float u_time;
+out vec4 fragColor;
+void main() {
+    fragColor = texture(u_texture_0, uv) + 1e-9 * vec4(
+        shading + frag_world_pos.x + water_line + fog_range.x + cam_pos.x
+        + sky_horizon.x + sky_zenith.x + u_time);
+}
+"""
+
+
+def _stripe_texture(ctx, tile=16):
+    """One tile of 1-texel vertical stripes, filtered exactly as the game's is."""
+    texels = np.zeros((tile, tile, 3), dtype='u1')
+    texels[:, ::2] = 255                      # every other column white
+    tex = ctx.texture_array((tile, tile, 1), 3, texels.tobytes())
+    tex.repeat_x = tex.repeat_y = True
+    tex.build_mipmaps()
+    tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+    return tex
+
+
+def _stripe_sharpness(ctx, prog, fbo):
+    """Fraction of a scanline sitting at one extreme or the other.
+
+    One 16-texel tile stretched across the whole 256px frame, so a texel is 16
+    pixels wide and the sampler is deep in magnification. Snapped to texel
+    centres, all but the transition pixel of each texel is flat: ~0.9. Left to
+    the hardware's bilinear, a 1-texel stripe becomes a triangle wave and almost
+    nothing is flat: ~0.1.
+    """
+    half = math.tan(math.radians(FOV / 2))    # quad exactly fills the viewport
+    verts = []
+    for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, -1), (1, 1), (-1, 1)):
+        verts += [dx * half, dy * half, -1.0,
+                  (dx + 1) * 0.5, (dy + 1) * 0.5, 0.0, 1.0]
+    _draw_terrain(ctx, prog, fbo, verts)
+
+    row = _image(fbo)[HEIGHT // 2, 8:WIDTH - 8, 0]
+    row = (row - row.min()) / max(1e-6, row.max() - row.min())
+    return float(((row < 0.05) | (row > 0.95)).mean())
+
+
 def _fog_of(pixel, unfogged, fogged):
     """Recover the fog factor from a rendered pixel (colour lerps unfogged→fogged)."""
     span = np.array(fogged, dtype='f4') - unfogged
@@ -244,8 +303,25 @@ def main():
     # --- water shares the curve and the same sky function ---
     for name in ('fog_range', 'sky_horizon', 'sky_zenith', 'u_time'):
         assert name in water_prog, f'water lost {name}: it will fade differently'
-    print('OK: fog is radial, ramps with render distance, and resolves to the '
-          'sky — clouds and sun included')
+
+    # --- magnified blocks are still hard-edged ---
+    # The sampler magnifies linearly now, because that bilinear tap is what
+    # sample_nearest uses to resolve the last screen pixel of a texel edge
+    # instead of letting it jump from one pixel to the next as you walk. The
+    # blocky look is therefore the shader's doing, and this is the A/B that says
+    # so: the same geometry and the same texture through a plain texture() call.
+    plain_prog = ctx.program(vertex_shader=load_source('shaders/chunk.vert'),
+                             fragment_shader=_FRAG_PLAIN)
+    _stripe_texture(ctx).use(0)
+    snapped = _stripe_sharpness(ctx, chunk_prog, fbo)
+    plain = _stripe_sharpness(ctx, plain_prog, fbo)
+    print(f'  1-texel stripes magnified 16x: sample_nearest {snapped:.0%} of the '
+          f'scanline flat, plain texture() {plain:.0%}')
+    assert snapped > 0.75, 'magnified blocks went soft — sample_nearest is not snapping'
+    assert plain < 0.4, 'the plain sampler is sharp too, so this proves nothing'
+
+    print('OK: fog is radial, ramps with render distance, resolves to the sky — '
+          'clouds and sun included — and magnified blocks stay hard-edged')
 
 
 if __name__ == '__main__':

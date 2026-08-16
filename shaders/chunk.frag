@@ -11,5 +11,5 @@
 void main() {
     // Alpha is 1.0 for every layer this pass can reach — build_atlas.py
     // flattens it — so it is dropped here rather than written and ignored.
-    fragColor = vec4(shade_terrain(texture(u_texture_0, uv)).rgb, 1.0);
+    fragColor = vec4(shade_terrain(sample_nearest(uv)).rgb, 1.0);
 }

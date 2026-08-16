@@ -19,6 +19,37 @@ uniform vec3 cam_pos;     // Eye position, for radial (spherical) fog
 
 out vec4 fragColor;
 
+// Nearest-neighbour magnification done here instead of by the sampler — the
+// reference's `sampleNearest` (`referans/.../shaders/core/terrain.fsh`, and the
+// answer referans.md points at for this).
+//
+// A NEAREST sampler picks exactly one texel per fragment, so the boundary
+// between two texels lands wholly inside one pixel or the other. Walk forward
+// and that boundary jumps a pixel at a time, in step across a whole wall of
+// repeating blocks — which is the crawling distortion you only see while
+// moving. This snaps the UV to the texel centre exactly as NEAREST does, then
+// backs the snap off over the last screen pixel of the texel, so the edge
+// resolves instead of jumping. Up close the block stays hard-edged; the only
+// thing that changes is that its edges stop crawling.
+//
+// It needs a LINEAR sampler — the hardware's bilinear tap is what draws that
+// one-pixel ramp, so `create_texture_array` sets the filter accordingly. The
+// HUD keeps NEAREST through its own sampler object: an icon is magnified 3x
+// with no derivatives worth the name, and there LINEAR is just blur.
+vec4 sample_nearest(vec3 uvw) {
+    vec2 texel = 1.0 / vec2(textureSize(u_texture_0, 0).xy);
+    vec2 du = dFdx(uvw.xy);
+    vec2 dv = dFdy(uvw.xy);
+    // One screen pixel, measured in uv units. Guarded because a degenerate
+    // quad gives a zero derivative and the ratio below would be 0/0.
+    vec2 pixel = max(sqrt(du * du + dv * dv), vec2(1e-8));
+
+    vec2 coord = uvw.xy / texel;
+    vec2 center = round(coord) - 0.5;
+    vec2 offset = clamp((coord - center - 0.5) * texel / pixel + 0.5, 0.0, 1.0);
+    return textureGrad(u_texture_0, vec3((center + offset) * texel, uvw.z), du, dv);
+}
+
 // Colour and coverage for one terrain texel. Alpha comes back as 1.0 for
 // anything the atlas baked opaque, so the opaque pass can ignore it entirely.
 vec4 shade_terrain(vec4 texel) {
