@@ -7,7 +7,7 @@ import threading
 import queue
 import time
 from world.modern_chunk import ModernChunk, CHUNK_SIZE
-from world.blocks import FACE_LAYER, OPAQUE
+from world.blocks import FACE_LAYER, OPAQUE, SHAPE_TABLE
 from world.fast_builder import build_chunk_mesh_fast, make_mesh_buffers, NO_NEIGHBOR
 from engine.frustum import Frustum
 
@@ -151,7 +151,7 @@ class ThreadedChunkManager:
             chunk = self.chunks[(chunk_x, chunk_z)]
             chunk.upload_mesh(*build_chunk_mesh_fast(
                 chunk.blocks, chunk_x, chunk_z, self._neighbor_blocks(chunk_x, chunk_z),
-                *scratch, FACE_LAYER, OPAQUE))
+                *scratch, FACE_LAYER, OPAQUE, SHAPE_TABLE))
 
         generated_count = len(generated)
         self.initial_chunks_generated = True
@@ -267,7 +267,8 @@ class ThreadedChunkManager:
                         # picked up on the main thread when the request was queued.
                         mesh = build_chunk_mesh_fast(
                             chunk.blocks, chunk.chunk_x, chunk.chunk_z, mesh_request['neighbors'],
-                            *scratch, FACE_LAYER, OPAQUE, mesh_request['lod']
+                            *scratch, FACE_LAYER, OPAQUE, SHAPE_TABLE,
+                            mesh_request['lod']
                         )
 
                         # Queue completed mesh for main thread

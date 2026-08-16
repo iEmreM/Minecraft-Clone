@@ -33,11 +33,20 @@ def check_registry():
                 f'{blocks.BLOCK_NAMES[bid]} face {face} points at the wrong layer'
 
     assert blocks.FACE_LAYER.max() < blocks.LAYER_COUNT
-    assert set(blocks.CREATIVE) == set(blocks.BLOCK_NAMES), 'a block is unreachable'
+    # Every block is either pickable or a variant the placement code reaches on
+    # its own — a door's other three facings, a tall plant's upper half. A block
+    # in neither set is one nothing in the game can ever produce.
+    assert set(blocks.CREATIVE) | blocks.HIDDEN == set(blocks.BLOCK_NAMES), \
+        'a block is unreachable'
+    assert not (set(blocks.CREATIVE) & blocks.HIDDEN), 'a hidden block is listed'
+    for bid in blocks.HIDDEN:
+        assert bid in blocks.LOWER or any(bid in row for row in blocks.FACING.values()), \
+            f'{blocks.BLOCK_NAMES[bid]} is hidden and nothing can place it'
     assert len(blocks.CREATIVE) == len(set(blocks.CREATIVE)), 'duplicate in CREATIVE'
     assert all(b in blocks.BLOCK_NAMES for b in blocks.HOTBAR_DEFAULT)
     assert len(blocks.HOTBAR_DEFAULT) == HOTBAR_SLOTS
-    print(f'registry: {len(blocks.BLOCK_NAMES)} blocks, '
+    print(f'registry: {len(blocks.BLOCK_NAMES)} blocks '
+          f'({len(blocks.CREATIVE)} pickable, {len(blocks.HIDDEN)} variants), '
           f'{blocks.LAYER_COUNT} atlas layers')
 
 

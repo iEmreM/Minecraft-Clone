@@ -40,7 +40,7 @@ import numpy as np
 from numba import njit
 
 from world.blocks import BLOCK_DTYPE
-from world.fast_noise import fast_noise2, fast_noise3
+from world.fast_noise import fast_noise2, fast_noise3, fast_rand
 
 # ---------------------------------------------------------------------------
 # Block ids
@@ -140,6 +140,45 @@ RED_TERRACOTTA = 220
 ORANGE_TERRACOTTA = 221
 YELLOW_TERRACOTTA = 222
 GLASS = 256
+# Ground cover — the non-cube blocks (world/shapes.py). Everything from here
+# down is drawn by the mesher's shape path and walked straight through.
+SHORT_GRASS = 400
+FERN = 401
+DEAD_BUSH = 402
+TALL_GRASS = 403
+TALL_GRASS_TOP = 404
+LARGE_FERN = 405
+LARGE_FERN_TOP = 406
+DANDELION = 407
+POPPY = 408
+BLUE_ORCHID = 409
+ALLIUM = 410
+AZURE_BLUET = 411
+RED_TULIP = 412
+ORANGE_TULIP = 413
+WHITE_TULIP = 414
+PINK_TULIP = 415
+OXEYE_DAISY = 416
+CORNFLOWER = 417
+LILY_OF_THE_VALLEY = 418
+SUNFLOWER = 421
+SUNFLOWER_TOP = 422
+LILAC = 423
+LILAC_TOP = 424
+ROSE_BUSH = 425
+ROSE_BUSH_TOP = 426
+PEONY = 427
+PEONY_TOP = 428
+BROWN_MUSHROOM = 429
+RED_MUSHROOM = 430
+WHEAT = 445
+CARROTS = 446
+POTATOES = 447
+BEETROOTS = 448
+SUGAR_CANE = 449
+CACTUS = 450
+SEAGRASS = 453
+SWEET_BERRY_BUSH = 455
 
 CHUNK_SIZE = 16
 CHUNK_HEIGHT = 256
@@ -636,6 +675,118 @@ assert all(B_TREES[globals()[name]] > 0 for name in _TREE_MIX), \
 assert all(B_TREES[b] == 0 or B_TREE_N[b] > 0 for b in range(BIOME_COUNT)), \
     "a biome has a tree rate but no mix to draw from"
 
+# ---------------------------------------------------------------------------
+# Ground cover
+# ---------------------------------------------------------------------------
+# The grass, ferns and flowers that go on top of the ground, and the same
+# structure the trees use: a rate per 10 000 columns and a mix to draw from,
+# because a biome with one plant in it reads as a texture rather than as ground.
+# The mixes are the reference's `patch_*` and `flower_*` configured features —
+# `flower_plains` really is the nine-flower list below, and a meadow really does
+# get more flowers than anything else.
+#
+# One block or two: the second column is what stands on top of the first, which
+# is how the two-block plants work in the real game as well (an upper and a
+# lower block state). 0 means the plant is one block tall.
+_PLANT_MIX = {
+    # patch_grass_plain + flower_plains
+    'PLAINS':          [(760, SHORT_GRASS, 0), (40, TALL_GRASS, TALL_GRASS_TOP),
+                        (30, DANDELION, 0), (30, POPPY, 0),
+                        (20, AZURE_BLUET, 0), (20, CORNFLOWER, 0),
+                        (20, OXEYE_DAISY, 0), (40, RED_TULIP, 0),
+                        (20, ORANGE_TULIP, 0), (10, WHITE_TULIP, 0),
+                        (10, PINK_TULIP, 0)],
+    # flower_meadow is the densest flower list in the game.
+    'MEADOW':          [(560, SHORT_GRASS, 0), (60, TALL_GRASS, TALL_GRASS_TOP),
+                        (70, DANDELION, 0), (70, ALLIUM, 0),
+                        (70, AZURE_BLUET, 0), (60, CORNFLOWER, 0),
+                        (60, OXEYE_DAISY, 0), (50, POPPY, 0)],
+    'FOREST':          [(700, SHORT_GRASS, 0), (90, FERN, 0),
+                        (60, TALL_GRASS, TALL_GRASS_TOP),
+                        (40, LILY_OF_THE_VALLEY, 0), (40, POPPY, 0),
+                        (30, DANDELION, 0), (20, RED_MUSHROOM, 0),
+                        (20, BROWN_MUSHROOM, 0)],
+    # The birch woods are the reference's flower forest neighbours: this is
+    # where the big two-block flowers grow.
+    'BIRCH_FOREST':    [(620, SHORT_GRASS, 0), (80, TALL_GRASS, TALL_GRASS_TOP),
+                        (60, LILY_OF_THE_VALLEY, 0), (60, LILAC, LILAC_TOP),
+                        (60, ROSE_BUSH, ROSE_BUSH_TOP), (60, PEONY, PEONY_TOP),
+                        (60, SUNFLOWER, SUNFLOWER_TOP)],
+    # A closed canopy is dark, so the floor is mushrooms rather than flowers.
+    'DARK_FOREST':     [(600, SHORT_GRASS, 0), (150, BROWN_MUSHROOM, 0),
+                        (150, RED_MUSHROOM, 0), (100, ROSE_BUSH, ROSE_BUSH_TOP)],
+    'TAIGA':           [(480, FERN, 0), (240, SHORT_GRASS, 0),
+                        (160, LARGE_FERN, LARGE_FERN_TOP),
+                        (120, SWEET_BERRY_BUSH, 0)],
+    'SNOWY_TAIGA':     [(600, FERN, 0), (300, SHORT_GRASS, 0),
+                        (100, LARGE_FERN, LARGE_FERN_TOP)],
+    # Grass poking up through the snow, which is what the reference's snowy
+    # taiga and grove look like. Nothing above them: a snowy slope is bare snow
+    # and a peak is bare rock.
+    'SNOWY_PLAINS':    [(1000, SHORT_GRASS, 0)],
+    'GROVE':           [(600, SHORT_GRASS, 0), (400, FERN, 0)],
+    'WINDSWEPT_HILLS': [(880, SHORT_GRASS, 0), (120, TALL_GRASS, TALL_GRASS_TOP)],
+    'SAVANNA':         [(820, SHORT_GRASS, 0), (180, TALL_GRASS, TALL_GRASS_TOP)],
+    'JUNGLE':          [(620, SHORT_GRASS, 0), (280, FERN, 0),
+                        (60, LARGE_FERN, LARGE_FERN_TOP), (40, SUGAR_CANE, SUGAR_CANE)],
+    'SWAMP':           [(620, SHORT_GRASS, 0), (140, BLUE_ORCHID, 0),
+                        (120, BROWN_MUSHROOM, 0), (120, SUGAR_CANE, SUGAR_CANE)],
+    'DESERT':          [(700, DEAD_BUSH, 0), (300, CACTUS, CACTUS)],
+    'BADLANDS':        [(1000, DEAD_BUSH, 0)],
+    'RIVER':           [(700, SHORT_GRASS, 0), (300, SUGAR_CANE, SUGAR_CANE)],
+    'BEACH':           [(1000, SUGAR_CANE, SUGAR_CANE)],
+    # The sea floor. Seagrass is the one plant that goes in water, so it is
+    # gated on the column being *under* the waterline rather than above it.
+    'OCEAN':           [(1000, SEAGRASS, 0)],
+    'WARM_OCEAN':      [(1000, SEAGRASS, 0)],
+    'DEEP_OCEAN':      [(1000, SEAGRASS, 0)],
+}
+
+PLANT_SLOTS = 11
+
+
+def _plant_mix(rows):
+    count = np.zeros(BIOME_COUNT, dtype=np.int32)
+    block = np.zeros((BIOME_COUNT, PLANT_SLOTS), dtype=np.int32)
+    above = np.zeros((BIOME_COUNT, PLANT_SLOTS), dtype=np.int32)
+    cumulative = np.ones((BIOME_COUNT, PLANT_SLOTS), dtype=np.float64)
+    for name, variants in rows.items():
+        assert len(variants) <= PLANT_SLOTS, name
+        biome = globals()[name]
+        total = float(sum(v[0] for v in variants))
+        acc = 0.0
+        for i, (weight, plant, top) in enumerate(variants):
+            acc += weight / total
+            cumulative[biome, i] = acc
+            block[biome, i] = plant
+            above[biome, i] = top
+        cumulative[biome, len(variants) - 1] = 1.0
+        count[biome] = len(variants)
+    return count, block, above, cumulative
+
+
+B_PLANT_N, B_PLANT_ID, B_PLANT_TOP, B_PLANT_CUM = _plant_mix(_PLANT_MIX)
+
+# How often a column grows something, per 10 000 — the same units as B_TREES.
+# A fifth of a plains is the reference's own density roughly halved: its
+# `patch_grass_plain` runs 32 tries a chunk against a placement filter, ours is
+# one roll per column with nothing to reject it, and every plant is 4 quads in
+# the blended pass.
+B_PLANTS = _biome_table(
+    0,
+    PLAINS=2000, MEADOW=2800, FOREST=1700, BIRCH_FOREST=1600, DARK_FOREST=900,
+    TAIGA=1300, SNOWY_TAIGA=650, SNOWY_PLAINS=380,
+    GROVE=450, WINDSWEPT_HILLS=650, SAVANNA=2200, JUNGLE=2600, SWAMP=1100,
+    DESERT=110, BADLANDS=80, RIVER=500, BEACH=40,
+    OCEAN=900, WARM_OCEAN=1400, DEEP_OCEAN=500,
+)
+PLANT_RATE_MAX = int(B_PLANTS.max())
+
+assert all(B_PLANTS[globals()[name]] > 0 for name in _PLANT_MIX), \
+    'a biome has a plant mix but no rate, so nothing will ever grow'
+assert all(B_PLANTS[b] == 0 or B_PLANT_N[b] > 0 for b in range(BIOME_COUNT)), \
+    'a biome has a plant rate but no mix to draw from'
+
 # Where a village may stand. Flat, walkable, above water.
 B_VILLAGE = _biome_table(
     0, PLAINS=1, MEADOW=1, SAVANNA=1, TAIGA=1, SNOWY_PLAINS=1, DESERT=1,
@@ -656,7 +807,10 @@ V_PATH = np.array([GRAVEL, SANDSTONE, COARSE_DIRT, GRAVEL], dtype=np.int32)
 V_ACCENT = np.array([STRIPPED_OAK_LOG, CUT_SANDSTONE, ACACIA_LOG,
                      STRIPPED_SPRUCE_LOG], dtype=np.int32)
 V_BED = np.array([RED_WOOL, WHITE_WOOL, ORANGE_WOOL, LIGHT_BLUE_WOOL], dtype=np.int32)
-V_CROP = np.array([HAY_BALE, MELON, PUMPKIN, HAY_BALE], dtype=np.int32)
+# Real crops now that there is a shape that can draw one — a field of four
+# parallel planes rather than the full cubes (hay, melon, pumpkin) that stood in
+# for them while every block had to be a cube.
+V_CROP = np.array([WHEAT, BEETROOTS, CARROTS, POTATOES], dtype=np.int32)
 B_VILLAGE_STYLE = _biome_table(
     0, DESERT=1, BADLANDS=1, SAVANNA=2, TAIGA=3, SNOWY_TAIGA=3, SNOWY_PLAINS=3,
 )
@@ -745,14 +899,6 @@ VILLAGE_PROBE = 18       # how far out the site is checked for being level
 # and the streets follow the ground — so this is much looser than it was, which
 # is also what stopped villages being confined to the flattest ground there is.
 VILLAGE_FLAT = 9
-
-
-@njit(nogil=True, fastmath=True, cache=True)
-def fast_rand(x, y, z):
-    """Deterministic value in [0, 1) from a position. The world's only RNG."""
-    n = int(x * 374761393 + y * 668265263 + z * 437585453)
-    n = (n ^ (n >> 13)) * 1274126177
-    return ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 2147483647.0
 
 
 @njit(nogil=True, fastmath=True, cache=True)
@@ -2406,6 +2552,60 @@ def generate_chunk_fast(chunk_x, chunk_z, blocks):
     for v in range(n_villages):
         build_village(blocks, chunk_x, chunk_z, v_x[v], v_z[v], v_y[v],
                       v_style[v], heights)
+
+    # --- 9. ground cover ---------------------------------------------------
+    # Last, and chunk-only. Last because a plant defers to everything else: it
+    # goes where the ground is still the biome's own and the cell above it is
+    # still empty, so a trunk, a street or a house floor simply leaves no room
+    # and nothing has to be deleted afterwards. Chunk-only because a plant is
+    # one column wide — the padded ring exists for canopies, and nothing here
+    # reaches across a seam.
+    for lx in range(CHUNK_SIZE):
+        for lz in range(CHUNK_SIZE):
+            wx = ox + lx
+            wz = oz + lz
+            roll = fast_rand(wx, 29.0, wz) * 10000.0
+            if roll >= PLANT_RATE_MAX:
+                continue                      # one hash rejects most of the map
+            biome = biomes[lx + PAD, lz + PAD]
+            if roll >= B_PLANTS[biome]:
+                continue
+
+            h = heights[lx + PAD, lz + PAD]
+            if h + 2 >= CHUNK_HEIGHT:
+                continue
+
+            # Seagrass grows in the water and everything else grows out of it.
+            underwater = h < SEA_LEVEL - 1
+            ground = blocks[lx, h, lz]
+            above = AIR if not underwater else WATER
+            if blocks[lx, h + 1, lz] != above:
+                continue
+            if underwater:
+                if ground != SAND and ground != GRAVEL and ground != CLAY:
+                    continue
+            elif (ground != GRASS and ground != SNOWY_GRASS and ground != PODZOL
+                    and ground != DIRT and ground != MUD and ground != SAND
+                    and ground != RED_SAND):
+                # Everything else is a village street, a rock, a patch of
+                # gravel or bare stone — the ground the reference will not put a
+                # plant on either.
+                continue
+
+            pick = fast_rand(wx, 31.0, wz)
+            slot = 0
+            while slot < B_PLANT_N[biome] - 1 and pick > B_PLANT_CUM[biome, slot]:
+                slot += 1
+
+            # A two-block plant goes down whole or not at all, the same rule the
+            # doors follow: a lower half on its own is a different plant with
+            # the top sawn off it.
+            top = B_PLANT_TOP[biome, slot]
+            if top != 0 and blocks[lx, h + 2, lz] != above:
+                continue
+            blocks[lx, h + 1, lz] = B_PLANT_ID[biome, slot]
+            if top != 0:
+                blocks[lx, h + 2, lz] = top
 
 
 class AdvancedTerrainGenerator:

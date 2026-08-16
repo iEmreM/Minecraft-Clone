@@ -23,7 +23,8 @@ import time
 
 import numpy as np
 
-from world.blocks import BLOCK_DTYPE, FACE_LAYER, OPAQUE
+from world.blocks import (BLOCK_DTYPE, BLOCK_NAMES, FACE_LAYER, LOWER, OPAQUE,
+                          SHAPE_OF, SHAPE_TABLE, UPPER)
 from world.fast_builder import AIR, SEAL_COVER, build_chunk_mesh_fast, make_mesh_buffers
 from world.terrain_generator import (BIOME_NAMES, B_TREES, CAVE_ROOF,
                                      CHUNK_HEIGHT, CHUNK_SIZE, MIN_TERRAIN,
@@ -160,6 +161,41 @@ def check_bounds(chunks):
                 assert blocks[x, 0, z] == 31, "no bedrock floor"
 
 
+def check_ground_cover(chunks):
+    """Grass, ferns and flowers: on the ground, whole, and not on the pavement.
+
+    Ground cover is the last thing the generator places and the only pass that
+    has to defer to every other one, so what goes wrong here is a plant standing
+    on a village street, floating over a hole, or a two-block plant with its top
+    half sawn off — each of which reads as a bug in the world rather than as an
+    exception anywhere.
+    """
+    grows_on = {1, 2, 4, 5, 21, 24, 27, 128,          # land: grass, dirt, sand
+                12, 20}                                # sea bed: gravel, clay
+    found = collections.Counter()
+    for blocks in chunks.values():
+        for x, y, z in np.argwhere(SHAPE_OF[blocks] > 0):
+            plant = int(blocks[x, y, z])
+            found[plant] += 1
+
+            if plant in LOWER:                        # an upper half
+                assert int(blocks[x, y - 1, z]) == LOWER[plant], \
+                    f'{BLOCK_NAMES[plant]} at {x, y, z} has no lower half under it'
+                continue
+
+            # Sugar cane and cactus stack on themselves rather than carrying a
+            # separate upper block, which is how the real game grows them too.
+            under = int(blocks[x, y - 1, z])
+            assert under in grows_on or under == plant, \
+                f'{BLOCK_NAMES[plant]} at {x, y, z} is standing on {BLOCK_NAMES.get(under, under)}'
+            if plant in UPPER:
+                assert int(blocks[x, y + 1, z]) == UPPER[plant], \
+                    f'{BLOCK_NAMES[plant]} at {x, y, z} lost its upper half'
+
+    assert found, 'no ground cover in the sample — this check proves nothing'
+    return found
+
+
 # One block that only appears in one kind of building. A village that scores
 # fewer than three of these is eight copies of the same box, which is what the
 # single-template version was.
@@ -279,7 +315,7 @@ def report(chunks):
                           chunks[(chunk_x, chunk_z - 1)], chunks[(chunk_x, chunk_z + 1)])
             v, i, tv, ti = build_chunk_mesh_fast(chunks[(chunk_x, chunk_z)], chunk_x,
                                                  chunk_z, neighbours, *buffers,
-                                                 FACE_LAYER, OPAQUE, 0)
+                                                 FACE_LAYER, OPAQUE, SHAPE_TABLE, 0)
             quads += (len(v) // 7 + len(tv) // 7) // 4
         return quads
 
@@ -377,9 +413,15 @@ if __name__ == '__main__':
     # The seam check needs trees to count, so it runs on a wooded patch rather
     # than on whatever the first one happened to be. Which patch is wooded moves
     # every time the terrain is retuned, so it is searched for, not written down.
-    ratio = check_seams(wooded_patch(5))
+    wooded = wooded_patch(5)
+    ratio = check_seams(wooded)
     print(f"caves stay {SEAL_COVER}+ blocks under the surface, "
           f"canopies cross seams (chunk-edge leaf density {ratio:.0%} of mid-chunk)")
+
+    cover = check_ground_cover({**chunks, **wooded})
+    print(f"ground cover: {sum(cover.values()) // (len(chunks) + len(wooded))}/chunk "
+          f"over {len(cover)} kinds, all rooted — "
+          + ", ".join(f"{BLOCK_NAMES[b]} {n}" for b, n in cover.most_common(4)))
 
     shapes, leaves = check_trees()
     print(f"{len(shapes)} tree shapes, none reaching past PAD={PAD}, "

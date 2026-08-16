@@ -25,7 +25,7 @@ import pygame as pg
 
 from engine.shader_manager import ShaderManager, load_source
 from world import blocks
-from world.blocks import BLOCK_DTYPE, FACE_LAYER, OPAQUE
+from world.blocks import BLOCK_DTYPE, FACE_LAYER, OPAQUE, SHAPE_TABLE
 from world.fast_builder import (CHUNK_HEIGHT, CHUNK_SIZE, MAX_FACES_ALPHA,
                                 NO_NEIGHBOR, build_chunk_mesh_fast,
                                 make_mesh_buffers)
@@ -55,7 +55,7 @@ def code(path):
 def mesh(grid):
     """(opaque quads, see-through quads) for a chunk of blocks."""
     v, _, tv, _ = build_chunk_mesh_fast(grid, 0, 0, EMPTY, *BUFFERS,
-                                        FACE_LAYER, OPAQUE, 0)
+                                        FACE_LAYER, OPAQUE, SHAPE_TABLE, 0)
     return len(v) // 28, len(tv) // 28
 
 
@@ -68,17 +68,20 @@ def check_registry():
     assert OPAQUE[0] == 0, 'AIR must not hide a face'
     assert OPAQUE[8] == 0, 'WATER must not hide a face'
     for bid in blocks.BLOCK_NAMES:
-        want = 0 if bid in blocks.TRANSPARENT else 1
+        # Two kinds of block cannot hide the face behind them and both are in
+        # CUTOUT: the see-through cubes, and every non-cube shape — a torch does
+        # not fill its cell, so the wall behind it still has to be drawn.
+        want = 0 if bid in blocks.CUTOUT else 1
         assert bool(OPAQUE[bid]) == bool(want), \
             f'{blocks.BLOCK_NAMES[bid]} is on the wrong side'
         # OPAQUE is a three-value enum, not a flag: foliage hides the face
         # behind it like any solid block but must not count as cover for the far
         # LOD's cave sealing, so it carries a 2. Only column_seal_limit reads it.
         assert (OPAQUE[bid] == 2) == (bid in blocks.FOLIAGE and bid not in
-                                      blocks.TRANSPARENT), \
+                                      blocks.CUTOUT), \
             f'{blocks.BLOCK_NAMES[bid]} disagrees with the Yaprak group'
-    print(f'registry: {len(blocks.TRANSPARENT)} see-through of '
-          f'{len(blocks.BLOCK_NAMES)} blocks')
+    print(f'registry: {len(blocks.TRANSPARENT)} see-through cubes and '
+          f'{len(blocks.SHAPE_NAME)} shapes of {len(blocks.BLOCK_NAMES)} blocks')
 
 
 def check_atlas_keeps_alpha():
@@ -88,15 +91,34 @@ def check_atlas_keeps_alpha():
         f'{ATLAS} has no alpha channel — rerun `python build_atlas.py`'
     alpha = pg.surfarray.array_alpha(surface)
 
-    see_through = {name for bid in blocks.TRANSPARENT for name in blocks.BLOCK_FACES[bid]}
+    cutout = {name for bid in blocks.CUTOUT for name in blocks.BLOCK_FACES[bid]}
+    cube = {name for bid, faces in blocks.BLOCK_FACES.items()
+            if bid not in blocks.CUTOUT for name in faces}
+
+    holey = 0
     for layer, name in enumerate(blocks.TEXTURES):
         tile = alpha[:, layer * TILE:(layer + 1) * TILE]
-        if name in see_through:
-            assert tile.min() < 250, f'{name}: baked opaque, the block would be solid'
-        else:
+        if name not in cutout:
             assert tile.min() == 255, f'{name}: kept alpha, the opaque pass would blend it'
-    print(f'{ATLAS}: {len(see_through)} layers keep their alpha, '
-          f'{len(blocks.TEXTURES) - len(see_through)} are flat')
+        elif name in cube:
+            # A carpet and its wool block share one layer, and a layer is baked
+            # one way. That is only safe while the file has no holes to keep.
+            assert tile.min() == 255, \
+                (f'{name} is on a cube block and a see-through one, and it has '
+                 'holes — the cube would be drawn with them')
+        else:
+            holey += tile.min() < 250
+
+    # The ones build_atlas would quietly turn into solid pale squares if the
+    # alpha rule ever stopped covering them. A flattened torch is a brown block.
+    for name in ('glass', 'white_stained_glass', 'short_grass', 'torch',
+                 'oak_door_top', 'ladder', 'oak_sapling', 'wheat_stage7'):
+        layer = blocks.TEXTURES.index(name)
+        assert alpha[:, layer * TILE:(layer + 1) * TILE].min() < 250, \
+            f'{name}: baked opaque — rerun `python build_atlas.py`'
+
+    print(f'{ATLAS}: {holey} layers keep real holes, '
+          f'{len(blocks.TEXTURES) - holey} are flat')
 
 
 def check_glass_meshes_into_the_second_buffer():
@@ -154,14 +176,17 @@ def check_glass_casts_no_ambient_occlusion():
     """A pane beside a floor must not draw a contact shadow under itself."""
     floor = world()
     floor[:, 9, :] = STONE
-    bare = build_chunk_mesh_fast(floor, 0, 0, EMPTY, *BUFFERS, FACE_LAYER, OPAQUE, 0)[0]
+    bare = build_chunk_mesh_fast(floor, 0, 0, EMPTY, *BUFFERS, FACE_LAYER, OPAQUE,
+                                 SHAPE_TABLE, 0)[0]
 
     floor[4, 10, 4] = GLASS
-    glazed = build_chunk_mesh_fast(floor, 0, 0, EMPTY, *BUFFERS, FACE_LAYER, OPAQUE, 0)[0]
+    glazed = build_chunk_mesh_fast(floor, 0, 0, EMPTY, *BUFFERS, FACE_LAYER, OPAQUE,
+                                 SHAPE_TABLE, 0)[0]
     assert np.array_equal(bare, glazed), 'the glass darkened the floor around it'
 
     floor[4, 10, 4] = STONE
-    shaded = build_chunk_mesh_fast(floor, 0, 0, EMPTY, *BUFFERS, FACE_LAYER, OPAQUE, 0)[0]
+    shaded = build_chunk_mesh_fast(floor, 0, 0, EMPTY, *BUFFERS, FACE_LAYER, OPAQUE,
+                                 SHAPE_TABLE, 0)[0]
     assert not np.array_equal(bare, shaded), \
         'a solid block is supposed to occlude — this check proves nothing otherwise'
 

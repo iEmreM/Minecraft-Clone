@@ -49,13 +49,21 @@ SRC = os.path.join('referans', 'assets', 'minecraft', 'textures', 'block')
 OUT = 'texture.png'
 TILE = 16
 
-# The textures that keep their alpha, straight off the transparent block group.
-ALPHA_TEXTURES = {name for bid in blocks.TRANSPARENT
+# The textures that keep their alpha: the see-through cubes plus every non-cube
+# shape. A flower is 88% holes and a torch 92% — for those this is not a design
+# choice the way it is for glass, it is the only way they are a torch at all.
+ALPHA_TEXTURES = {name for bid in blocks.CUTOUT
                   for name in blocks.BLOCK_FACES[bid]}
-_OPAQUE_TEXTURES = {name for bid, faces in blocks.BLOCK_FACES.items()
-                    if bid not in blocks.TRANSPARENT for name in faces}
-assert not (ALPHA_TEXTURES & _OPAQUE_TEXTURES), \
-    'a texture is shared by a transparent and an opaque block — one layer cannot be both'
+_CUBE_TEXTURES = {name for bid, faces in blocks.BLOCK_FACES.items()
+                  if bid not in blocks.CUTOUT for name in faces}
+
+# A layer is one thing or the other, so a texture used by both kinds of block
+# can only be baked once — and it is baked with alpha kept. That is harmless
+# exactly when the file has no transparency to keep, which is the case for every
+# sharing there is now (a carpet and its wool block, a snow layer and its snow).
+# Checked against the files in main(), not asserted away here: the alternative
+# is a second copy of the same 16x16 in the atlas for nothing.
+SHARED_TEXTURES = ALPHA_TEXTURES & _CUBE_TEXTURES
 
 
 def load_tile(name):
@@ -150,6 +158,12 @@ def main():
 
     pg.init()
     pg.display.set_mode((1, 1))   # convert_alpha() needs a display format
+
+    for name in sorted(SHARED_TEXTURES):
+        tile = build_tile(name)
+        assert tile[..., 3].min() == 255, \
+            (f'{name} is used by a cube block and by a see-through one, and it '
+             'has transparency — the cube would be drawn with holes in it')
 
     n = blocks.LAYER_COUNT
     # surfarray is (width, height): one column of n tiles.

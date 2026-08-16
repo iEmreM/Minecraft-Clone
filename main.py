@@ -4,7 +4,7 @@ import time
 from engine.renderer import ModernGLRenderer
 from engine.camera import Camera
 from world.modern_chunk import AIR, GRASS, WATER
-from world.blocks import BLOCK_NAMES
+from world.blocks import BLOCK_NAMES, COLLIDES, FACING, LOWER, UPPER, WALL_MOUNTED
 from world.threaded_chunk_manager import ThreadedChunkManager
 from world.terrain_generator import find_spawn
 import glm
@@ -584,23 +584,76 @@ class MinecraftModernGL:
         raycast_result = self.raycast()
         if raycast_result['hit']:
             x, y, z = raycast_result['block_pos']
+            block = int(raycast_result['block_type'])
             self.set_block_at(x, y, z, AIR)
+
+            # A door is two blocks and a tall plant is too. Taking one half and
+            # leaving the other is the thing that looks broken, so both go.
+            if block in UPPER:
+                self.set_block_at(x, y + 1, z, AIR)
+            elif block in LOWER:
+                self.set_block_at(x, y - 1, z, AIR)
+
             print(f"Removed block at ({x}, {y}, {z})")
-    
+
+    def orient(self, block_id, cell, target):
+        """The facing variant of *block_id* for this placement, or it unchanged.
+
+        `ModernChunk.blocks` has one id per cell and no room for a state byte, so
+        a door's four facings are four block ids (see blocks.FACING). Facing is
+        which side of its own cell the geometry hugs: a ladder hugs the wall it
+        was clicked onto, and everything else hugs the side the player is on, so
+        a door faces them the way the real game's does.
+        """
+        row = FACING.get(block_id)
+        if row is None:
+            return block_id
+
+        dx = target[0] - cell[0]
+        dz = target[2] - cell[2]
+        if block_id not in WALL_MOUNTED or (dx == 0 and dz == 0):
+            yaw = math.radians(self.camera.yaw)
+            dx, dz = -math.cos(yaw), -math.sin(yaw)
+
+        if abs(dx) > abs(dz):
+            return row[1] if dx > 0 else row[3]      # +X, -X
+        return row[2] if dz > 0 else row[0]          # +Z, -Z
+
     def add_block(self):
         """Add a block next to the one the player is looking at"""
         raycast_result = self.raycast()
-        if raycast_result['hit']:
-            x, y, z = raycast_result['prev_pos']
-            
-            # Don't place a block the player is standing in
-            if self.camera.intersects_block(x, y, z):
-                return
+        if not raycast_result['hit']:
+            return
 
-            # Only place where there is nothing to displace — air, or water
-            if self.get_block_at(x, y, z) in REPLACEABLE:
-                self.set_block_at(x, y, z, self.selected_block_type)
-                print(f"Placed {self.selected_block_type} block at ({x}, {y}, {z})")
+        x, y, z = raycast_result['prev_pos']
+
+        # Only place where there is nothing to displace — air, or water
+        if self.get_block_at(x, y, z) not in REPLACEABLE:
+            return
+
+        block_id = self.orient(self.selected_block_type,
+                               raycast_result['prev_pos'],
+                               raycast_result['block_pos'])
+
+        # Don't place a block the player is standing in — one they would then be
+        # stuck inside. A torch or a flower is not one of those: the real game
+        # lets you stand in them too, and refusing here is what made it
+        # impossible to put a torch down at your own feet.
+        if COLLIDES[block_id] and self.camera.intersects_block(x, y, z):
+            return
+
+        # A door is two blocks, and half a door is worse than none: if the upper
+        # half has nowhere to go, nothing is placed at all.
+        upper = UPPER.get(block_id)
+        if upper is not None:
+            if (self.get_block_at(x, y + 1, z) not in REPLACEABLE
+                    or (COLLIDES[block_id]
+                        and self.camera.intersects_block(x, y + 1, z))):
+                return
+            self.set_block_at(x, y + 1, z, upper)
+
+        self.set_block_at(x, y, z, block_id)
+        print(f"Placed {block_id} block at ({x}, {y}, {z})")
 
 
 if __name__ == "__main__":

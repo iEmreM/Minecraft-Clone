@@ -1,18 +1,20 @@
 import glm
 import math
 
-from world.blocks import WATER
+from world.blocks import COLLIDES
 
 
 def _solid(block):
-    """Whether a block stops the player.
+    """Whether a block stops the player — one lookup in `blocks.COLLIDES`.
 
-    Only AIR and WATER let them through — glass is see-through, not walk-through.
-    Water became a real block when the terrain generator started filling the sea
-    instead of leaving a dry basin under the water plane; before that every
-    `!= 0` in here was equivalent.
+    Glass is see-through, not walk-through, so most of the table is True. What
+    is not: air; water, which became a real block when the terrain generator
+    started filling the sea instead of leaving a dry basin under the water
+    plane; and the non-cube blocks that have no business stopping anyone — a
+    tuft of grass, a torch, a carpet you stand *on top of* rather than beside.
+    See blocks.COLLIDES for why that list is what it is.
     """
-    return block != 0 and block != WATER
+    return COLLIDES[block]
 
 
 class Camera:
@@ -59,7 +61,7 @@ class Camera:
         self.jump_velocity = 9.5
         self.walk_speed = 4.3
         self.sprint_speed = 7.0
-        self.fly_speed = 10.9
+        self.fly_speed = 100.9
         self.terminal_velocity = -78.4
         
         # Collision (like ornek1)

@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from world.blocks import BLOCK_DTYPE, FACE_LAYER, OPAQUE
+from world.blocks import BLOCK_DTYPE, FACE_LAYER, OPAQUE, SHAPE_TABLE
 from world.fast_builder import (AIR, SEAL_COVER, STONE, WATER,
                                 build_chunk_mesh_fast, column_seal_limit,
                                 make_mesh_buffers, seal_buried_air)
@@ -144,32 +144,45 @@ def main():
 
     inner = [(x, z) for x in range(1, PATCH - 1) for z in range(1, PATCH - 1)]
     print(f"{len(inner)} chunks, neighbour-aware, seed {terrain_generator.seed}\n")
-    print(f"{'lod':>3} {'quads':>8} {'triangles':>10} {'ms/chunk':>9} {'vs lod0':>8}")
+    print(f"{'lod':>3} {'cube quads':>11} {'plant quads':>12} {'triangles':>10} "
+          f"{'ms/chunk':>9} {'vs lod0':>8}")
 
     quads_by_lod = {}
+    shape_quads_by_lod = {}
     for lod in (0, 1, 2):
         build_chunk_mesh_fast(chunks[(1, 1)], 1, 1, neighbors_of(chunks, 1, 1),
-                              *buffers, FACE_LAYER, OPAQUE, lod)   # warm the JIT
+                              *buffers, FACE_LAYER, OPAQUE, SHAPE_TABLE, lod)
 
-        quads = triangles = 0
+        quads = shape_quads = triangles = 0
         started = time.perf_counter()
         for chunk_x, chunk_z in inner:
             vertices, indices, t_vertices, t_indices = build_chunk_mesh_fast(
                 chunks[(chunk_x, chunk_z)], chunk_x, chunk_z,
                 neighbors_of(chunks, chunk_x, chunk_z), *buffers,
-                FACE_LAYER, OPAQUE, lod)
-            assert len(t_vertices) == 0, "generated terrain has no see-through blocks"
+                FACE_LAYER, OPAQUE, SHAPE_TABLE, lod)
             quads += len(vertices) // 28
-            triangles += len(indices) // 3
+            # The second buffer used to be empty on generated terrain. It is
+            # the ground cover now — grass, ferns, flowers — and it is the
+            # blended pass, so it is worth watching separately.
+            shape_quads += len(t_vertices) // 28
+            triangles += (len(indices) + len(t_indices)) // 3
             check_footprint(vertices, chunk_x, chunk_z, lod)
         elapsed = time.perf_counter() - started
 
         quads_by_lod[lod] = quads
-        print(f"{lod:>3} {quads / len(inner):>8.0f} {triangles / len(inner):>10.0f} "
+        shape_quads_by_lod[lod] = shape_quads
+        print(f"{lod:>3} {quads / len(inner):>11.0f} {shape_quads / len(inner):>12.0f} "
+              f"{triangles / len(inner):>10.0f} "
               f"{elapsed / len(inner) * 1000:>9.2f} {quads / quads_by_lod[0]:>7.0%}")
 
     assert quads_by_lod[1] < quads_by_lod[0], "sealing buried air merged nothing"
     assert quads_by_lod[2] < quads_by_lod[1], "flat shading merged nothing"
+    assert shape_quads_by_lod[0] > 0, \
+        "no ground cover in the sample — the plant column proves nothing"
+    assert shape_quads_by_lod[1] == shape_quads_by_lod[0], \
+        "level 1 is supposed to seal caves and nothing else"
+    assert shape_quads_by_lod[2] == 0, \
+        "level 2 drops ground cover: a tuft of grass is 2.5 px out there"
     print("\nok")
 
 

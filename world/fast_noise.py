@@ -185,3 +185,17 @@ def fast_noise3(x, y, z):
         n3 = t3 * t3 * (GRAD3[idx]*x3 + GRAD3[idx+1]*y3 + GRAD3[idx+2]*z3)
         
     return 32.0 * (n0 + n1 + n2 + n3)
+
+
+@njit(nogil=True, fastmath=True, cache=True)
+def fast_rand(x, y, z):
+    """Deterministic value in [0, 1) from a position. The world's only RNG.
+
+    It lives here rather than in terrain_generator because the mesher needs it
+    too: the reference nudges cross-shaped models sideways from a hash of the
+    block position, and the same hash has to answer the same for a plant however
+    it is asked (see shapes.JITTER).
+    """
+    n = int(x * 374761393 + y * 668265263 + z * 437585453)
+    n = (n ^ (n >> 13)) * 1274126177
+    return ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 2147483647.0

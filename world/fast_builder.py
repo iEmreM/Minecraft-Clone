@@ -3,6 +3,8 @@ from numba import njit
 import math
 
 from world.blocks import BLOCK_DTYPE
+from world.fast_noise import fast_rand
+from world.shapes import JITTER
 
 # Chunk constants
 CHUNK_SIZE = 16
@@ -34,10 +36,12 @@ NO_NEIGHBOR = np.zeros((CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), dtype=BLOCK_DTYPE
 # mostly headroom for player-built geometry.
 MAX_FACES = 20000
 
-# The same, for the see-through pass. Nothing in generated terrain is
-# transparent, so every one of those quads is something a player placed: the
-# buffer is sized for a large glass build, not for a whole chunk of it.
-MAX_FACES_ALPHA = 6000
+# The same, for the see-through pass — which is also where every non-cube block
+# goes. Generated terrain does fill this one now: a meadow puts a plant on
+# roughly a fifth of its columns and each is 4 quads, so a grassy chunk arrives
+# with a few hundred already in it (225 chunks at seed 42: 90 on average, 308 on
+# the worst, a jungle). The rest is headroom for a glass build on top of that.
+MAX_FACES_ALPHA = 8000
 
 
 def make_mesh_buffers():
@@ -392,16 +396,66 @@ def emit_greedy_quad(vertices, offset, chunk_x, chunk_z, x, y, z, width, height,
         vertices[base+6] = shading * AO_LEVELS[(ao_code >> (2 * i)) & 3]
 
 @njit(nogil=True, fastmath=True, cache=True)
+def emit_shape_quads(vertices, offset, chunk_x, chunk_z, x, y, z, q0, q1,
+                     block_type, face_layers, s_pos, s_uv, s_slot, s_shade,
+                     jitter):
+    """Copy one non-cube block's quads into *vertices*, starting at *offset*.
+
+    The whole of the second draw path. A shape is a fixed list of quads in the
+    block's own 0..1 cell (world/shapes.py), so there is nothing to merge, no
+    neighbor to test and no AO to sample — this is a memcpy with the block's
+    world position added and the atlas layer resolved per quad.
+
+    *jitter* is the reference's `offset_type: XZ`, which every cross-shaped model
+    carries: the plant is nudged up to a quarter block sideways from a hash of
+    where it stands. Without it a meadow is a grid. It is the block's *world*
+    position that is hashed, so the same tuft lands in the same place whichever
+    chunk rebuild drew it.
+    """
+    wx = float(chunk_x * CHUNK_SIZE + x)
+    wz = float(chunk_z * CHUNK_SIZE + z)
+
+    dx = 0.0
+    dz = 0.0
+    if jitter != 0:
+        dx = (fast_rand(wx, 0.0, wz) - 0.5) * 2.0 * JITTER
+        dz = (fast_rand(wx, 1.0, wz) - 0.5) * 2.0 * JITTER
+
+    at = offset
+    for q in range(q0, q1):
+        layer = float(face_layers[block_type, s_slot[q]])
+        shade = s_shade[q]
+        for i in range(4):
+            vertices[at] = wx + s_pos[q, i, 0] + dx
+            vertices[at + 1] = float(y) + s_pos[q, i, 1]
+            vertices[at + 2] = wz + s_pos[q, i, 2] + dz
+            vertices[at + 3] = s_uv[q, i, 0]
+            vertices[at + 4] = s_uv[q, i, 1]
+            vertices[at + 5] = layer
+            vertices[at + 6] = shade
+            at += 7
+
+
+@njit(nogil=True, fastmath=True, cache=True)
 def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices,
-                          t_vertices, t_indices, face_layers, opaque, lod=0):
+                          t_vertices, t_indices, face_layers, opaque, shape_table,
+                          lod=0):
     """
     Fast chunk mesh builder using Greedy Meshing (Texture Array version)
 
     *neighbors* is the (-X, +X, -Z, +Z) tuple of neighbor block arrays; see
     get_block_ext. Pass NO_NEIGHBOR for any chunk that is not loaded.
 
-    *face_layers* is blocks.FACE_LAYER and *opaque* is blocks.OPAQUE, both
-    passed as arguments rather than read as globals — see emit_greedy_quad.
+    *face_layers* is blocks.FACE_LAYER, *opaque* is blocks.OPAQUE and
+    *shape_table* is blocks.SHAPE_TABLE, all passed as arguments rather than
+    read as globals — see emit_greedy_quad.
+
+    **Two paths, not one.** `shape_table`'s first array says which: 0 is a cube
+    and goes through the greedy sweep below exactly as before, -1 is not drawn
+    at all (air, water), and anything positive is a torch, a flower or a door,
+    drawn quad for quad by emit_shape_quads. That one lookup replaced the
+    `!= AIR and != WATER` the mask loop used to open with, so the hot path pays
+    nothing for the feature.
 
     The four scratch buffers come from make_mesh_buffers, one set per meshing
     thread. Returns right-sized copies of the filled part of each, so the
@@ -485,8 +539,51 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices
     if scan_height > CHUNK_HEIGHT:
         scan_height = CHUNK_HEIGHT
 
+    # --- the blocks that are not cubes -------------------------------------
+    # One sweep, ahead of the greedy one, over the same bounded height. Every
+    # shape carries alpha, so every quad goes into the see-through buffer and is
+    # drawn by the blended pass — the opaque terrain pass never sees them and
+    # keeps its early-Z.
+    #
+    # A full shape or none of it: dropping half a torch would leave a floating
+    # flame. The buffer filling up skips that block and lets the sweep carry on,
+    # for the same reason the greedy pass does — see MAX_FACES_ALPHA.
+    #
+    # Level 2 drops them, and it is the one thing any level removes rather than
+    # hides. It starts at 16 chunks; at 1200x800 and a 65 degree FOV a block
+    # covers 628/d pixels, so a tuft of grass out there is 2.5 px of a fogged
+    # silhouette, and it is a quarter of what the far ring draws (152 quads a
+    # chunk against 624). Ground cover is also the only thing in the world that
+    # is *only* detail — dropping a distant tree would leave a hole in a wood.
+    shape_of, s_start, s_pos, s_uv, s_slot, s_shade, s_jitter = shape_table
+    for lx in range(CHUNK_SIZE if lod < 2 else 0):
+        for ly in range(scan_height):
+            for lz in range(CHUNK_SIZE):
+                block_type = blocks[lx, ly, lz]
+                kind = shape_of[block_type]
+                if kind <= 0:
+                    continue
+                q0 = s_start[kind]
+                n_quads = s_start[kind + 1] - q0
+                if t_vertex_count + 4 * n_quads > max_t_vertices:
+                    continue
+                emit_shape_quads(t_vertices, t_vertex_count * 7, chunk_x, chunk_z,
+                                 lx, ly, lz, q0, q0 + n_quads, block_type,
+                                 face_layers, s_pos, s_uv, s_slot, s_shade,
+                                 s_jitter[kind])
+                for j in range(n_quads):
+                    corner = t_vertex_count + j * 4
+                    t_indices[t_index_count] = corner
+                    t_indices[t_index_count + 1] = corner + 1
+                    t_indices[t_index_count + 2] = corner + 2
+                    t_indices[t_index_count + 3] = corner
+                    t_indices[t_index_count + 4] = corner + 2
+                    t_indices[t_index_count + 5] = corner + 3
+                    t_index_count += 6
+                t_vertex_count += 4 * n_quads
+
     dims = np.array([CHUNK_SIZE, scan_height, CHUNK_SIZE])
-    
+
     for face_id in range(6):
         if overflow:
             break
@@ -523,7 +620,9 @@ def build_chunk_mesh_fast(blocks, chunk_x, chunk_z, neighbors, vertices, indices
                     
                     block_type = blocks[x, y, z]
 
-                    if block_type != AIR and block_type != WATER:
+                    # Cubes only: air and water are not drawn here at all, and
+                    # the shapes were drawn above.
+                    if shape_of[block_type] == 0:
                         nx, ny, nz = x, y, z
                         if d_axis == 0: nx += direction
                         elif d_axis == 1: ny += direction
