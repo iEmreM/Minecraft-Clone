@@ -61,7 +61,7 @@ class Camera:
         self.jump_velocity = 9.5
         self.walk_speed = 4.3
         self.sprint_speed = 7.0
-        self.fly_speed = 100.9
+        self.fly_speed = 10.9
         self.terminal_velocity = -78.4
         
         # Collision (like ornek1)

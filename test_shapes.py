@@ -122,6 +122,36 @@ def check_quad_counts_match_the_models():
           f'counts match the reference models')
 
 
+def check_a_cactus_is_a_full_width_block():
+    """Every side spans the cell corner to corner and stands a pixel back from it.
+
+    The reference gets that from *which element carries which faces*: north and
+    south come off the box inset in z, east and west off the one inset in x.
+    Swap them and nothing here changes except the geometry — six quads, valid
+    winding, whole-tile uvs — but each side is 14 pixels wide and flush, so a
+    column of cacti has a 1-pixel slit down all four of its corners and the side
+    texture is squeezed into 7/8 of the width it was drawn for.
+    """
+    px = shapes.PX
+    want = {shapes.FRONT: (0.0, 1.0, 15 * px, 15 * px),      # +Z, set back in z
+            shapes.BACK: (0.0, 1.0, 1 * px, 1 * px),         # -Z
+            shapes.RIGHT: (15 * px, 15 * px, 0.0, 1.0),      # +X, set back in x
+            shapes.LEFT: (1 * px, 1 * px, 0.0, 1.0),         # -X
+            shapes.TOP: (0.0, 1.0, 0.0, 1.0),                # a full cube face
+            shapes.BOTTOM: (0.0, 1.0, 0.0, 1.0)}
+    for corners, uvs, slot, _ in shapes.SHAPES['cactus']:
+        xs = [c[0] for c in corners]
+        zs = [c[2] for c in corners]
+        assert (min(xs), max(xs), min(zs), max(zs)) == want[slot], \
+            f'cactus face {slot} is at {min(xs), max(xs), min(zs), max(zs)}, ' \
+            f'expected {want[slot]}'
+        us = [u for u, _v in uvs]
+        vs = [_v for _u, _v in uvs]
+        assert (min(us), max(us), min(vs), max(vs)) == (0.0, 1.0, 0.0, 1.0), \
+            f'cactus face {slot} samples part of its tile, not all of it'
+    print('a cactus is a full-width block with each side set one pixel in')
+
+
 def check_shapes_go_to_the_blended_pass():
     """Every one of them, and none of the opaque one.
 
@@ -326,6 +356,7 @@ def check_a_furnace_turns_without_becoming_a_shape():
 def main():
     check_a_full_box_is_a_cube_face()
     check_quad_counts_match_the_models()
+    check_a_cactus_is_a_full_width_block()
     check_shapes_go_to_the_blended_pass()
     check_a_plant_hides_nothing()
     check_the_greedy_path_never_sees_them()

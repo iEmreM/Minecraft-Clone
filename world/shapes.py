@@ -305,12 +305,18 @@ def _ladder(facing):
 
 
 def _cactus():
-    """`block/cactus` — the sides sit flush but stop a pixel short sideways, so
-    the four corner columns are open. The top and bottom are a full cube face."""
-    return (box(1 * PX, 0.0, 0.0, 15 * PX, 1.0, 1.0, faces=(FRONT, BACK),
-                uv={FRONT: (0.0, 0.0, 1.0, 1.0), BACK: (0.0, 0.0, 1.0, 1.0)})
-            + box(0.0, 0.0, 1 * PX, 1.0, 1.0, 15 * PX, faces=(RIGHT, LEFT),
-                  uv={RIGHT: (0.0, 0.0, 1.0, 1.0), LEFT: (0.0, 0.0, 1.0, 1.0)})
+    """`block/cactus` — each side is set a pixel *in along its own normal* and is
+    otherwise a full-width cube face; the top and bottom are full cube faces.
+
+    Which element carries which faces is the whole shape. The reference draws
+    north/south off the box inset in z and east/west off the one inset in x, so
+    every side still spans the cell corner to corner and only stands back from
+    it. Read the other way round — inset in x but drawn as north/south — the
+    quad count, the uvs and the winding are all still right, and the block comes
+    out 14 pixels wide with a 1-pixel slit down each of its four corners.
+    """
+    return (box(0.0, 0.0, 1 * PX, 1.0, 1.0, 15 * PX, faces=(FRONT, BACK))
+            + box(1 * PX, 0.0, 0.0, 15 * PX, 1.0, 1.0, faces=(RIGHT, LEFT))
             + box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, faces=(TOP, BOTTOM)))
 
 
