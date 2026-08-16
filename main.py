@@ -3,13 +3,21 @@ import sys
 import time
 from engine.renderer import ModernGLRenderer
 from engine.camera import Camera
-from world.modern_chunk import AIR, GRASS
+from world.modern_chunk import AIR, GRASS, WATER
 from world.blocks import BLOCK_NAMES
 from world.threaded_chunk_manager import ThreadedChunkManager
 from world.terrain_generator import find_spawn
 import glm
 import math
 from engine.hud import HUDRenderer, HOTBAR_SLOTS
+
+# What the crosshair goes straight through, and what a placed block overwrites.
+# Water is in it for the same reason it is in the real game: the ray does not
+# stop on it, so the sea is never outlined and never breakable, and a block
+# aimed at the sea bed lands *in* the water instead of stacking on its surface.
+# One tuple, because the outline and the placement have to agree — a ray that
+# passes through a block it then refuses to build in targets nothing at all.
+REPLACEABLE = (AIR, WATER)
 
 
 class MinecraftModernGL:
@@ -530,7 +538,7 @@ class MinecraftModernGL:
         while True:
             # Check if we hit a block
             block_type = self.get_block_at(x, y, z)
-            if block_type != AIR:
+            if block_type not in REPLACEABLE:
                 return {
                     'hit': True,
                     'block_pos': (x, y, z),
@@ -589,8 +597,8 @@ class MinecraftModernGL:
             if self.camera.intersects_block(x, y, z):
                 return
 
-            # Only place if the position is currently air
-            if self.get_block_at(x, y, z) == AIR:
+            # Only place where there is nothing to displace — air, or water
+            if self.get_block_at(x, y, z) in REPLACEABLE:
                 self.set_block_at(x, y, z, self.selected_block_type)
                 print(f"Placed {self.selected_block_type} block at ({x}, {y}, {z})")
 
