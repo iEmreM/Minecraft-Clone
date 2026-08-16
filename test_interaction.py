@@ -13,12 +13,15 @@ so they are borrowed onto a stub world that supplies exactly those.
 
 import main
 from main import REPLACEABLE, MinecraftModernGL
-from world.blocks import FACING, LOWER, UPPER
+from world.blocks import BLOCK_NAMES, FACING, LOWER, SHAPE_NAME, UPPER
 from world.modern_chunk import AIR, GRASS, STONE, WATER
+from world.shapes import FACING_NAMES
 
 REACH = 8.0
 
 OAK_DOOR = min(bid for bid in FACING if bid in UPPER)
+FURNACE = next(bid for bid in FACING
+               if BLOCK_NAMES[bid] == 'Furnace' and bid not in SHAPE_NAME)
 
 
 class Vec:
@@ -168,12 +171,40 @@ def check_a_door_is_two_blocks():
     print(f'door: {OAK_DOOR} -> ({lower}, {upper}), both halves placed and broken')
 
 
+def check_a_furnace_faces_the_player():
+    """Its door comes out on the side the player placed it from.
+
+    Same rule and the same code path as the door's, on a block that is still a
+    plain cube — `blocks._oriented` only moves the front texture round. The four
+    yaws below are the four cardinal directions the player can be looking, and
+    the facing has to be the one pointing back at them.
+    """
+    faced = []
+    for yaw, want in ((0.0, 'west'), (90.0, 'north'), (180.0, 'east'),
+                      (270.0, 'south')):
+        player = Player({(0, 25, 0): STONE}, eye=(0.5, 26.5, 0.5),
+                        look=(0, -1, 0))
+        player.camera.yaw = yaw
+        player.selected_block_type = FURNACE
+        player.add_block()
+
+        placed = player.get_block_at(0, 26, 0)
+        row = FACING[FURNACE]
+        assert placed in row, f'yaw {yaw}: placed {placed}, not a furnace'
+        assert FACING_NAMES[row.index(placed)] == want, \
+            f'yaw {yaw}: faces {FACING_NAMES[row.index(placed)]}, not {want}'
+        faced.append(want)
+    assert len(set(faced)) == 4, 'two yaws gave the same facing'
+    print(f'furnace: {FURNACE} -> {FACING[FURNACE]}, one facing per yaw')
+
+
 def run():
     check_the_ray_goes_through_water()
     check_a_block_replaces_the_water()
     check_nothing_but_water_is_no_target()
     check_solids_still_stop_the_ray()
     check_a_door_is_two_blocks()
+    check_a_furnace_faces_the_player()
     check_the_two_readings_agree()
     print('\nok')
 

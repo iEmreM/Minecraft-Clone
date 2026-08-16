@@ -122,6 +122,15 @@ BRAIN_CORAL = 286
 BUBBLE_CORAL = 287
 FIRE_CORAL = 288
 HORN_CORAL = 289
+TUBE_CORAL_FAN = 735
+BRAIN_CORAL_FAN = 736
+BUBBLE_CORAL_FAN = 737
+FIRE_CORAL_FAN = 738
+HORN_CORAL_FAN = 739
+SEA_PICKLE = 745
+FARMLAND_MOIST = 641
+DIRT_PATH = 642
+LANTERN = 782
 WHITE_WOOL = 109
 RED_WOOL = 114
 ORANGE_WOOL = 115
@@ -738,7 +747,12 @@ _PLANT_MIX = {
     # The sea floor. Seagrass is the one plant that goes in water, so it is
     # gated on the column being *under* the waterline rather than above it.
     'OCEAN':           [(1000, SEAGRASS, 0)],
-    'WARM_OCEAN':      [(1000, SEAGRASS, 0)],
+    # seagrass_warm plus the reference's `coral_reef` — its fans are ours
+    # now, so a warm sea bed grows them instead of only the coral blocks.
+    'WARM_OCEAN':      [(560, SEAGRASS, 0), (70, TUBE_CORAL_FAN, 0),
+                        (70, BRAIN_CORAL_FAN, 0), (70, BUBBLE_CORAL_FAN, 0),
+                        (70, FIRE_CORAL_FAN, 0), (70, HORN_CORAL_FAN, 0),
+                        (90, SEA_PICKLE, 0)],
     'DEEP_OCEAN':      [(1000, SEAGRASS, 0)],
 }
 
@@ -801,7 +815,9 @@ V_WALL = np.array([OAK_PLANKS, SANDSTONE, ACACIA_PLANKS, SPRUCE_PLANKS], dtype=n
 V_POST = np.array([WOOD, CUT_SANDSTONE, ACACIA_LOG, SPRUCE_LOG], dtype=np.int32)
 V_FLOOR = np.array([COBBLESTONE, SANDSTONE, COARSE_DIRT, COBBLESTONE], dtype=np.int32)
 V_ROOF = np.array([BRICKS, SMOOTH_SANDSTONE, HAY_BALE, COBBLESTONE], dtype=np.int32)
-V_PATH = np.array([GRAVEL, SANDSTONE, COARSE_DIRT, GRAVEL], dtype=np.int32)
+# The real game's villages are paved with dirt path, and now that there is a
+# block for it they are here too. It stays a cube — see the row in blocks.py.
+V_PATH = np.array([DIRT_PATH, SANDSTONE, COARSE_DIRT, DIRT_PATH], dtype=np.int32)
 # Trim: window frames, beams and upper floors. One block that is not the wall
 # is what stops a facade being a flat plane of planks.
 V_ACCENT = np.array([STRIPPED_OAK_LOG, CUT_SANDSTONE, ACACIA_LOG,
@@ -2097,8 +2113,12 @@ def _build_farm(blocks, ox, oz, x0, z0, x1, z1, floor_y, style, seed):
             if row == 0:
                 _put(blocks, lx, floor_y, lz, CLAY)
                 _put(blocks, lx, floor_y + 1, lz, WATER)
-            elif fast_rand(x, 157.0, z) > 0.18:
-                _put(blocks, lx, floor_y + 1, lz, crop)
+            else:
+                # Every crop row is next to the channel, so the farmland is
+                # always the wet one.
+                _put(blocks, lx, floor_y, lz, FARMLAND_MOIST)
+                if fast_rand(x, 157.0, z) > 0.18:
+                    _put(blocks, lx, floor_y + 1, lz, crop)
 
 
 @njit(nogil=True, fastmath=True, cache=True)
@@ -2192,7 +2212,7 @@ def build_village(blocks, chunk_x, chunk_z, vx, vz, floor_y, style, heights):
                     and fast_rand(ox + lx, 227.0, oz + lz) < 0.005):
                 for y in range(ground + 1, ground + 4):
                     _put(blocks, lx, y, lz, post)
-                _put(blocks, lx, ground + 4, lz, GLOWSTONE)
+                _put(blocks, lx, ground + 4, lz, LANTERN)
 
     # --- the well in the middle of the plaza -------------------------------
     for dx in range(-2, 3):
@@ -2582,7 +2602,11 @@ def generate_chunk_fast(chunk_x, chunk_z, blocks):
             if blocks[lx, h + 1, lz] != above:
                 continue
             if underwater:
-                if ground != SAND and ground != GRAVEL and ground != CLAY:
+                # Coral counts as ground: the whole warm-ocean floor is a coral
+                # patch, and gating on sand alone left the one biome that has
+                # fans and pickles to give with no cover on it at all.
+                if (ground != SAND and ground != GRAVEL and ground != CLAY
+                        and (ground < TUBE_CORAL or ground > HORN_CORAL)):
                     continue
             elif (ground != GRASS and ground != SNOWY_GRASS and ground != PODZOL
                     and ground != DIRT and ground != MUD and ground != SAND

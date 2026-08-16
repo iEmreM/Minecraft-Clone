@@ -35,8 +35,9 @@ GRASS_PLANT = next(b for b, s in SHAPE_NAME.items() if s == 'cross')
 TORCH = next(b for b, s in SHAPE_NAME.items() if s == 'torch')
 CARPET = next(b for b, s in SHAPE_NAME.items() if s == 'carpet')
 CACTUS = next(b for b, s in SHAPE_NAME.items() if s == 'cactus')
-DOOR = min(b for b in FACING if SHAPE_NAME[b].startswith('door'))
+DOOR = min(b for b in FACING if SHAPE_NAME.get(b, '').startswith('door'))
 LADDER = min(WALL_MOUNTED)
+FURNACE = 94                      # a cube with four facings, not a shape
 
 
 def world():
@@ -96,7 +97,17 @@ def check_quad_counts_match_the_models():
     """
     want = {'cross': 4, 'crop': 8, 'torch': 6, 'cactus': 6, 'carpet': 6,
             'plate': 6, 'snow_layer': 6, 'lily': 2,
-            'door_north': 6, 'ladder_north': 2}
+            'door_north': 6, 'ladder_north': 2,
+            # One entry per drawn face of the matching model file, counted off
+            # its `elements`: template_torch_wall is one box with all six,
+            # template_lantern is 6 + 5 + 2 + 2, flower_pot is 6 + 6 + 4 + 4 + 2
+            # and the plant in it is another cross.
+            'torch_wall_west': 6, 'pot_empty': 22, 'pot': 26, 'lantern': 15,
+            'chain': 4, 'end_rod': 11, 'lightning_rod': 11, 'fan': 8,
+            'spore_blossom': 10, 'sea_pickle': 11, 'egg': 6, 'cake': 6,
+            'composter': 18, 'anvil': 21, 'enchanting_table': 6,
+            'daylight_detector': 6, 'lectern_north': 16,
+            'stonecutter_north': 8}
     for name, count in want.items():
         assert len(shapes.SHAPES[name]) == count, \
             f'{name}: {len(shapes.SHAPES[name])} quads, expected {count}'
@@ -278,6 +289,40 @@ def check_the_far_lod_drops_them():
     print('lod: ground cover survives level 1 and is dropped at level 2')
 
 
+def check_a_furnace_turns_without_becoming_a_shape():
+    """Four ids of one cube, its front texture on a different side in each.
+
+    `blocks._oriented` is the whole of the furnace's facing, and the point of
+    doing it in the texture table rather than in world/shapes.py is that nothing
+    else moves: the variants stay cubes, so they greedy-merge, keep early-Z and
+    stay out of the blended pass. Written wrong, a furnace ends up with two
+    doors or none.
+    """
+    front = FACE_LAYER[FURNACE, blocks.FRONT]
+    side = FACE_LAYER[FURNACE, blocks.BACK]
+    assert front != side, 'the furnace row has no front face to turn'
+
+    looks_out_of = (blocks.BACK, blocks.RIGHT, blocks.FRONT, blocks.LEFT)
+    for facing, bid in enumerate(FACING[FURNACE]):
+        assert SHAPE_OF[bid] == 0, 'an oriented cube stopped being a cube'
+        row = FACE_LAYER[bid]
+        assert row[looks_out_of[facing]] == front, \
+            f'facing {facing} does not carry its front'
+        for f in (blocks.FRONT, blocks.BACK, blocks.RIGHT, blocks.LEFT):
+            if f != looks_out_of[facing]:
+                assert row[f] == side, f'facing {facing} has a second front'
+        assert row[blocks.TOP] == FACE_LAYER[FURNACE, blocks.TOP]
+        assert row[blocks.BOTTOM] == FACE_LAYER[FURNACE, blocks.BOTTOM]
+
+    grid = world()
+    grid[5, 40, 5] = FACING[FURNACE][1]
+    opaque, alpha = mesh(grid)
+    assert len(opaque) == 6 and len(alpha) == 0, \
+        'an oriented cube left the greedy path'
+    print(f'{BLOCK_NAMES[FURNACE].lower()}: {len(FACING[FURNACE])} facings, '
+          'still one greedy cube')
+
+
 def main():
     check_a_full_box_is_a_cube_face()
     check_quad_counts_match_the_models()
@@ -286,6 +331,7 @@ def main():
     check_the_greedy_path_never_sees_them()
     check_the_jitter_is_positional()
     check_doors_face_four_ways()
+    check_a_furnace_turns_without_becoming_a_shape()
     check_collision_matches_the_shape()
     check_overflow_drops_plants_not_terrain()
     check_the_far_lod_drops_them()

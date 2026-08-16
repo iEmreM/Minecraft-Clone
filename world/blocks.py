@@ -31,8 +31,9 @@ from world import shapes
 # bottom of this file for what widening it past 8 bits cost.
 BLOCK_DTYPE = np.uint16
 
-# Face order, fixed by fast_builder.emit_greedy_quad. `front` is the +Z face; we
-# have no per-block rotation, so a furnace always faces the same way.
+# Face order, fixed by fast_builder.emit_greedy_quad. `front` is the +Z face,
+# which is where a one-off face (a furnace's door) lands unless `_oriented` has
+# moved it round.
 TOP, BOTTOM, FRONT, BACK, RIGHT, LEFT = range(6)
 
 # Greyscale masters that the real game tints at runtime from the biome colormap.
@@ -44,6 +45,9 @@ FOLIAGE_TINT = (0x77, 0xAB, 0x2F)
 # constant each, so these are the real values, not plains-biome stand-ins.
 BIRCH_TINT = (0x80, 0xA7, 0x55)
 SPRUCE_TINT = (0x61, 0x99, 0x61)
+# Dead leaves on the ground get their own colormap in the real game
+# (colormap/dry_foliage.png); this is its plains corner.
+DRY_TINT = (0xA3, 0x75, 0x46)
 
 TINTS = {
     'grass_block_top': GRASS_TINT,
@@ -59,6 +63,8 @@ TINTS = {
     'large_fern_bottom': GRASS_TINT,
     'large_fern_top': GRASS_TINT,
     'lily_pad': FOLIAGE_TINT,
+    'vine': FOLIAGE_TINT,
+    'leaf_litter': DRY_TINT,
     'oak_leaves': FOLIAGE_TINT,
     'jungle_leaves': FOLIAGE_TINT,
     'acacia_leaves': FOLIAGE_TINT,
@@ -94,6 +100,72 @@ UPPER = {}           # lower half -> upper half, for the two-block blocks
 LOWER = {}           # and back again
 _HIDDEN = set()      # variants the creative picker must not list
 WALL_MOUNTED = set() # placed against the block that was clicked, not by yaw
+
+
+def _expand(textures):
+    """One / three / four / six texture names -> the six faces, in face_id order.
+
+    Six is the escape hatch and it is written in face_id order, not the
+    reference's: a shape whose model names five or six different textures (a
+    lectern, a stonecutter) has nowhere else to put them.
+    """
+    if isinstance(textures, str):
+        return (textures,) * 6
+    if len(textures) == 6:
+        return tuple(textures)
+    if len(textures) == 3:
+        top, side, bottom = textures
+        front = side
+    else:
+        top, side, bottom, front = textures
+    faces = [None] * 6
+    faces[TOP] = top
+    faces[BOTTOM] = bottom
+    faces[FRONT] = front
+    faces[BACK] = faces[RIGHT] = faces[LEFT] = side
+    return tuple(faces)
+
+
+# Which of the six faces looks out of each of the four horizontal facings, in
+# FACING_NAMES order.
+_FACING_FACE = (BACK, RIGHT, FRONT, LEFT)                # -Z, +X, +Z, -X
+
+
+def _oriented(bid, name, faces, extra):
+    """Four ids of one *cube*, its odd face turned to a different side in each.
+
+    A furnace is a cube in every other respect, so this rotates `_expand`'s six
+    face names instead of adding a shape: the greedy mesher, the atlas and the
+    HUD icon all stay on the path they were already on, and the only new thing
+    in the world is three more ids and three more rows of `FACE_LAYER`.
+
+    The block keeps its own id for the facing `_expand` would have given it (+Z)
+    so its icon does not move; the other three are *extra* onward and hidden
+    from the picker. `main.orient` then places whichever one points back at the
+    player, which is the real game's rule for a furnace as much as for a door.
+
+    Only for the blocks whose front really differs from their sides — a
+    cartography table's four sides are three different textures and rotating one
+    of them would be a guess.
+    """
+    six = _expand(faces)
+    side, front = six[BACK], six[FRONT]
+    assert side != front, f'{name} has no front face to turn'
+    ids, rows, n = [], [], 0
+    for face in _FACING_FACE:
+        if face == FRONT:
+            ids.append(bid)
+            rows.append((bid, name, faces))
+            continue
+        turned = list(six)
+        turned[FRONT] = side
+        turned[face] = front
+        ids.append(extra + n)
+        rows.append((extra + n, name, tuple(turned)))
+        n += 1
+    FACING[bid] = tuple(ids)
+    _HIDDEN.update(i for i in ids if i != bid)
+    return rows
 
 
 def _variants(base, name, faces, shape_prefix, wall=False):
@@ -197,6 +269,14 @@ _TABLE = [
         (292, 'Dead Bubble Coral Block', 'dead_bubble_coral_block'),
         (293, 'Dead Fire Coral Block', 'dead_fire_coral_block'),
         (294, 'Dead Horn Coral Block', 'dead_horn_coral_block'),
+        # The reference draws these two a pixel short of full height, and they
+        # are cubes here anyway: the pixel is invisible unless a full block is
+        # beside them, and a shape would put a village's whole street network
+        # into the blended pass, which has no early-Z. Village farms stand on
+        # the first and village streets are the third.
+        (640, 'Farmland', ('farmland', 'dirt', 'dirt')),
+        (641, 'Moist Farmland', ('farmland_moist', 'dirt', 'dirt')),
+        (642, 'Dirt Path', ('dirt_path_top', 'dirt_path_side', 'dirt')),
     ]),
     ('Ahşap', [
         (7, 'Oak Log', ('oak_log_top', 'oak_log', 'oak_log_top')),
@@ -371,14 +451,20 @@ _TABLE = [
         (322, 'Target', ('target_top', 'target_side', 'target_top')),
     ]),
     ('Dekor', [
-        (93, 'Crafting Table', ('crafting_table_top', 'crafting_table_side', 'oak_planks',
-                                'crafting_table_front')),
-        (94, 'Furnace', ('furnace_top', 'furnace_side', 'furnace_top', 'furnace_front')),
+        # A handful of these are the same cube four times over with their front
+        # face turned — see _oriented. The other three ids of each are up in the
+        # 600s and hidden from the picker.
+        *_oriented(93, 'Crafting Table', ('crafting_table_top',
+                'crafting_table_side', 'oak_planks', 'crafting_table_front'), 600),
+        *_oriented(94, 'Furnace',
+                ('furnace_top', 'furnace_side', 'furnace_top', 'furnace_front'), 603),
         (95, 'Bookshelf', ('oak_planks', 'bookshelf', 'oak_planks')),
         (96, 'TNT', ('tnt_top', 'tnt_side', 'tnt_bottom')),
         (97, 'Pumpkin', ('pumpkin_top', 'pumpkin_side', 'pumpkin_top')),
-        (98, 'Carved Pumpkin', ('pumpkin_top', 'pumpkin_side', 'pumpkin_top', 'carved_pumpkin')),
-        (99, 'Jack o\'Lantern', ('pumpkin_top', 'pumpkin_side', 'pumpkin_top', 'jack_o_lantern')),
+        *_oriented(98, 'Carved Pumpkin',
+                ('pumpkin_top', 'pumpkin_side', 'pumpkin_top', 'carved_pumpkin'), 606),
+        *_oriented(99, 'Jack o\'Lantern',
+                ('pumpkin_top', 'pumpkin_side', 'pumpkin_top', 'jack_o_lantern'), 609),
         (100, 'Melon', ('melon_top', 'melon_side', 'melon_top')),
         (101, 'Hay Bale', ('hay_block_top', 'hay_block_side', 'hay_block_top')),
         (102, 'Glowstone', 'glowstone'),
@@ -389,18 +475,20 @@ _TABLE = [
         (107, 'Honeycomb Block', 'honeycomb_block'),
         (108, 'Dried Kelp Block', ('dried_kelp_top', 'dried_kelp_side', 'dried_kelp_bottom')),
         (183, 'Barrel', ('barrel_top', 'barrel_side', 'barrel_bottom')),
-        (184, 'Blast Furnace', ('blast_furnace_top', 'blast_furnace_side',
-                'blast_furnace_top', 'blast_furnace_front')),
-        (185, 'Smoker', ('smoker_top', 'smoker_side', 'smoker_bottom', 'smoker_front')),
-        (186, 'Dispenser', ('furnace_top', 'furnace_side', 'furnace_top',
-                'dispenser_front')),
+        *_oriented(184, 'Blast Furnace', ('blast_furnace_top', 'blast_furnace_side',
+                'blast_furnace_top', 'blast_furnace_front'), 612),
+        *_oriented(185, 'Smoker', ('smoker_top', 'smoker_side', 'smoker_bottom',
+                'smoker_front'), 615),
+        *_oriented(186, 'Dispenser', ('furnace_top', 'furnace_side', 'furnace_top',
+                'dispenser_front'), 618),
         (187, 'Cartography Table', ('cartography_table_top', 'cartography_table_side3',
                 'dark_oak_planks', 'cartography_table_side3')),
         (188, 'Fletching Table', ('fletching_table_top', 'fletching_table_front',
                 'birch_planks', 'fletching_table_front')),
         (189, 'Smithing Table', ('smithing_table_top', 'smithing_table_front',
                 'smithing_table_bottom', 'smithing_table_front')),
-        (190, 'Loom', ('loom_top', 'loom_side', 'loom_bottom', 'loom_front')),
+        *_oriented(190, 'Loom', ('loom_top', 'loom_side', 'loom_bottom',
+                'loom_front'), 621),
         (191, 'Lodestone', ('lodestone_top', 'lodestone_side', 'lodestone_top')),
         (192, 'Redstone Lamp', 'redstone_lamp'),
         (193, 'Ochre Froglight', ('ochre_froglight_top', 'ochre_froglight_side',
@@ -412,12 +500,12 @@ _TABLE = [
         (196, 'Shroomlight', 'shroomlight'),
         (197, 'Brown Mushroom Block', 'brown_mushroom_block'),
         (198, 'Red Mushroom Block', 'red_mushroom_block'),
-        (323, 'Dropper', ('furnace_top', 'furnace_side', 'furnace_top',
-                'dropper_front')),
-        (324, 'Bee Nest', ('bee_nest_top', 'bee_nest_side', 'bee_nest_bottom',
-                'bee_nest_front')),
-        (325, 'Beehive', ('beehive_end', 'beehive_side', 'beehive_end',
-                'beehive_front')),
+        *_oriented(323, 'Dropper', ('furnace_top', 'furnace_side', 'furnace_top',
+                'dropper_front'), 624),
+        *_oriented(324, 'Bee Nest', ('bee_nest_top', 'bee_nest_side',
+                'bee_nest_bottom', 'bee_nest_front'), 627),
+        *_oriented(325, 'Beehive', ('beehive_end', 'beehive_side', 'beehive_end',
+                'beehive_front'), 630),
         (326, 'Creaking Heart', ('creaking_heart_top', 'creaking_heart',
                 'creaking_heart_top')),
         (327, 'Respawn Anchor', ('respawn_anchor_top_off', 'respawn_anchor_side0',
@@ -638,6 +726,74 @@ _TABLE = [
         (453, 'Seagrass', 'seagrass', 'cross'),
         (454, 'Kelp', 'kelp', 'cross'),
         (455, 'Sweet Berry Bush', 'sweet_berry_bush_stage3', 'cross'),
+        # Everything the reference draws with `block/cross` and we had not
+        # picked up yet. One row each, no new geometry: crystals, coral, the
+        # nether's vines and the dry and pale plants.
+        (700, 'Amethyst Cluster', 'amethyst_cluster', 'cross'),
+        (701, 'Large Amethyst Bud', 'large_amethyst_bud', 'cross'),
+        (702, 'Medium Amethyst Bud', 'medium_amethyst_bud', 'cross'),
+        (703, 'Small Amethyst Bud', 'small_amethyst_bud', 'cross'),
+        # `block/pointed_dripstone` is the cross model with a taller tile; the
+        # up and down tips are two different textures, hence two blocks.
+        (704, 'Pointed Dripstone', 'pointed_dripstone_up_tip', 'cross'),
+        (705, 'Hanging Dripstone', 'pointed_dripstone_down_tip', 'cross'),
+        (706, 'Tube Coral', 'tube_coral', 'cross'),
+        (707, 'Brain Coral', 'brain_coral', 'cross'),
+        (708, 'Bubble Coral', 'bubble_coral', 'cross'),
+        (709, 'Fire Coral', 'fire_coral', 'cross'),
+        (710, 'Horn Coral', 'horn_coral', 'cross'),
+        (711, 'Dead Tube Coral', 'dead_tube_coral', 'cross'),
+        (712, 'Dead Brain Coral', 'dead_brain_coral', 'cross'),
+        (713, 'Dead Bubble Coral', 'dead_bubble_coral', 'cross'),
+        (714, 'Dead Fire Coral', 'dead_fire_coral', 'cross'),
+        (715, 'Dead Horn Coral', 'dead_horn_coral', 'cross'),
+        (716, 'Bush', 'bush', 'cross'),
+        (717, 'Cactus Flower', 'cactus_flower', 'cross'),
+        (718, 'Closed Eyeblossom', 'closed_eyeblossom', 'cross'),
+        (719, 'Open Eyeblossom', 'open_eyeblossom', 'cross'),
+        (720, 'Golden Dandelion', 'golden_dandelion', 'cross'),
+        (721, 'Firefly Bush', 'firefly_bush', 'cross'),
+        (722, 'Hanging Roots', 'hanging_roots', 'cross'),
+        (723, 'Pale Hanging Moss', 'pale_hanging_moss', 'cross'),
+        (724, 'Pale Oak Sapling', 'pale_oak_sapling', 'cross'),
+        (725, 'Short Dry Grass', 'short_dry_grass', 'cross'),
+        (726, 'Tall Dry Grass', 'tall_dry_grass', 'cross'),
+        (727, 'Twisting Vines', 'twisting_vines', 'cross'),
+        (728, 'Weeping Vines', 'weeping_vines', 'cross'),
+        (729, 'Cave Vines', 'cave_vines_plant', 'cross'),
+        (730, 'Glow Berries', 'cave_vines_lit', 'cross'),
+        (731, 'Bamboo Sapling', 'bamboo_stage0', 'cross'),
+        (732, 'Kelp Plant', 'kelp_plant', 'cross'),
+        # `block/coral_fan` — four blades hinged on the cell's edges.
+        (735, 'Tube Coral Fan', 'tube_coral_fan', 'fan'),
+        (736, 'Brain Coral Fan', 'brain_coral_fan', 'fan'),
+        (737, 'Bubble Coral Fan', 'bubble_coral_fan', 'fan'),
+        (738, 'Fire Coral Fan', 'fire_coral_fan', 'fan'),
+        (739, 'Horn Coral Fan', 'horn_coral_fan', 'fan'),
+        (740, 'Dead Tube Coral Fan', 'dead_tube_coral_fan', 'fan'),
+        (741, 'Dead Brain Coral Fan', 'dead_brain_coral_fan', 'fan'),
+        (742, 'Dead Bubble Coral Fan', 'dead_bubble_coral_fan', 'fan'),
+        (743, 'Dead Fire Coral Fan', 'dead_fire_coral_fan', 'fan'),
+        (744, 'Dead Horn Coral Fan', 'dead_horn_coral_fan', 'fan'),
+        (745, 'Sea Pickle', 'sea_pickle', 'sea_pickle'),
+        (746, 'Spore Blossom', ('spore_blossom_base', 'spore_blossom',
+                'spore_blossom', 'spore_blossom'), 'spore_blossom'),
+        # A sheet lying flat on the ground is the lily pad's model, and the
+        # frogspawn's and the leaf litter's — `leaf_litter_4` is four quarter
+        # quads tiling exactly this one. The petal beds are that plus a handful
+        # of 1px stems per quarter, which are dropped: 24 quads for something
+        # the size of a pixel.
+        (747, 'Pink Petals', 'pink_petals', 'lily'),
+        (748, 'Wildflowers', 'wildflowers', 'lily'),
+        (749, 'Leaf Litter', 'leaf_litter', 'lily'),
+        (750, 'Frogspawn', 'frogspawn', 'lily'),
+        (751, 'Turtle Egg', 'turtle_egg', 'egg'),
+        # `block/vine` is the ladder's plane to the pixel — 0.8 off the wall,
+        # full cell, drawn from both sides — so these four share its shape.
+        *_variants(752, 'Vine', 'vine', 'ladder', wall=True),
+        *_variants(756, 'Glow Lichen', 'glow_lichen', 'ladder', wall=True),
+        *_variants(760, 'Sculk Vein', 'sculk_vein', 'ladder', wall=True),
+        *_variants(764, 'Resin Clump', 'resin_clump', 'ladder', wall=True),
     ]),
     ('Eşya', [
         (460, 'Torch', 'torch', 'torch'),
@@ -677,25 +833,112 @@ _TABLE = [
         # The thin snow the real game lays over everything. The full Snow block
         # (id 5) is still the deep one the terrain is built from.
         (580, 'Snow Layer', 'snow', 'snow_layer'),
+        # A wall torch is the same tile as the floor one on a different model,
+        # so these three cost no atlas layer at all.
+        *_variants(770, 'Wall Torch', 'torch', 'torch_wall', wall=True),
+        *_variants(774, 'Soul Wall Torch', 'soul_torch', 'torch_wall', wall=True),
+        *_variants(778, 'Redstone Wall Torch', 'redstone_torch', 'torch_wall',
+                   wall=True),
+        (782, 'Lantern', 'lantern', 'lantern'),
+        (783, 'Soul Lantern', 'soul_lantern', 'lantern'),
+        (784, 'Copper Lantern', 'copper_lantern', 'lantern'),
+        (785, 'Chain', 'iron_chain', 'chain'),
+        (786, 'Copper Chain', 'copper_chain', 'chain'),
+        (787, 'End Rod', 'end_rod', 'end_rod'),
+        (788, 'Lightning Rod', 'lightning_rod', 'lightning_rod'),
+        (789, 'Cake', ('cake_top', 'cake_side', 'cake_bottom'), 'cake'),
+        # The pot's own two textures are TOP and BOTTOM; FRONT is the plant, so
+        # a potted block's row reads (pot, pot, dirt, plant) and the HUD icon —
+        # which is the FRONT face — comes out as the flower, not the pot.
+        (822, 'Flower Pot', ('flower_pot', 'flower_pot', 'dirt', 'flower_pot'),
+              'pot_empty'),
+        (790, 'Potted Acacia Sapling', ('flower_pot', 'flower_pot', 'dirt',
+                'acacia_sapling'), 'pot'),
+        (791, 'Potted Allium', ('flower_pot', 'flower_pot', 'dirt',
+                'allium'), 'pot'),
+        (792, 'Potted Azure Bluet', ('flower_pot', 'flower_pot', 'dirt',
+                'azure_bluet'), 'pot'),
+        (793, 'Potted Birch Sapling', ('flower_pot', 'flower_pot', 'dirt',
+                'birch_sapling'), 'pot'),
+        (794, 'Potted Blue Orchid', ('flower_pot', 'flower_pot', 'dirt',
+                'blue_orchid'), 'pot'),
+        (795, 'Potted Brown Mushroom', ('flower_pot', 'flower_pot', 'dirt',
+                'brown_mushroom'), 'pot'),
+        (796, 'Potted Cherry Sapling', ('flower_pot', 'flower_pot', 'dirt',
+                'cherry_sapling'), 'pot'),
+        (797, 'Potted Closed Eyeblossom', ('flower_pot', 'flower_pot', 'dirt',
+                'closed_eyeblossom'), 'pot'),
+        (798, 'Potted Cornflower', ('flower_pot', 'flower_pot', 'dirt',
+                'cornflower'), 'pot'),
+        (799, 'Potted Crimson Fungus', ('flower_pot', 'flower_pot', 'dirt',
+                'crimson_fungus'), 'pot'),
+        (800, 'Potted Crimson Roots', ('flower_pot', 'flower_pot', 'dirt',
+                'crimson_roots_pot'), 'pot'),
+        (801, 'Potted Dandelion', ('flower_pot', 'flower_pot', 'dirt',
+                'dandelion'), 'pot'),
+        (802, 'Potted Dark Oak Sapling', ('flower_pot', 'flower_pot', 'dirt',
+                'dark_oak_sapling'), 'pot'),
+        (803, 'Potted Dead Bush', ('flower_pot', 'flower_pot', 'dirt',
+                'dead_bush'), 'pot'),
+        (804, 'Potted Fern', ('flower_pot', 'flower_pot', 'dirt',
+                'fern'), 'pot'),
+        (805, 'Potted Golden Dandelion', ('flower_pot', 'flower_pot', 'dirt',
+                'golden_dandelion'), 'pot'),
+        (806, 'Potted Jungle Sapling', ('flower_pot', 'flower_pot', 'dirt',
+                'jungle_sapling'), 'pot'),
+        (807, 'Potted Lily of the Valley', ('flower_pot', 'flower_pot', 'dirt',
+                'lily_of_the_valley'), 'pot'),
+        (808, 'Potted Oak Sapling', ('flower_pot', 'flower_pot', 'dirt',
+                'oak_sapling'), 'pot'),
+        (809, 'Potted Orange Tulip', ('flower_pot', 'flower_pot', 'dirt',
+                'orange_tulip'), 'pot'),
+        (810, 'Potted Oxeye Daisy', ('flower_pot', 'flower_pot', 'dirt',
+                'oxeye_daisy'), 'pot'),
+        (811, 'Potted Pale Oak Sapling', ('flower_pot', 'flower_pot', 'dirt',
+                'pale_oak_sapling'), 'pot'),
+        (812, 'Potted Pink Tulip', ('flower_pot', 'flower_pot', 'dirt',
+                'pink_tulip'), 'pot'),
+        (813, 'Potted Poppy', ('flower_pot', 'flower_pot', 'dirt',
+                'poppy'), 'pot'),
+        (814, 'Potted Red Mushroom', ('flower_pot', 'flower_pot', 'dirt',
+                'red_mushroom'), 'pot'),
+        (815, 'Potted Red Tulip', ('flower_pot', 'flower_pot', 'dirt',
+                'red_tulip'), 'pot'),
+        (816, 'Potted Spruce Sapling', ('flower_pot', 'flower_pot', 'dirt',
+                'spruce_sapling'), 'pot'),
+        (817, 'Potted Torchflower', ('flower_pot', 'flower_pot', 'dirt',
+                'torchflower'), 'pot'),
+        (818, 'Potted Warped Fungus', ('flower_pot', 'flower_pot', 'dirt',
+                'warped_fungus'), 'pot'),
+        (819, 'Potted Warped Roots', ('flower_pot', 'flower_pot', 'dirt',
+                'warped_roots_pot'), 'pot'),
+        (820, 'Potted White Tulip', ('flower_pot', 'flower_pot', 'dirt',
+                'white_tulip'), 'pot'),
+        (821, 'Potted Wither Rose', ('flower_pot', 'flower_pot', 'dirt',
+                'wither_rose'), 'pot'),
+        (830, 'Composter', ('composter_top', 'composter_side',
+                'composter_bottom'), 'composter'),
+        (831, 'Anvil', ('anvil_top', 'anvil', 'anvil'), 'anvil'),
+        (832, 'Chipped Anvil', ('chipped_anvil_top', 'anvil', 'anvil'), 'anvil'),
+        (833, 'Damaged Anvil', ('damaged_anvil_top', 'anvil', 'anvil'), 'anvil'),
+        (834, 'Enchanting Table', ('enchanting_table_top',
+                'enchanting_table_side', 'enchanting_table_bottom'),
+              'enchanting_table'),
+        (835, 'Daylight Detector', ('daylight_detector_top',
+                'daylight_detector_side', 'daylight_detector_side'),
+              'daylight_detector'),
+        # The two shapes whose models name more than four textures, so their
+        # rows spell all six faces out in face_id order — see _expand. The
+        # mapping is the shape's, not the reference's: shapes._lectern reads
+        # TOP as the desk, BOTTOM as the planks, FRONT as its face, BACK as its
+        # sides and RIGHT as its base.
+        *_variants(840, 'Lectern', ('lectern_top', 'oak_planks', 'lectern_front',
+                'lectern_sides', 'lectern_base', 'lectern_sides'), 'lectern'),
+        *_variants(844, 'Stonecutter', ('stonecutter_top', 'stonecutter_bottom',
+                'stonecutter_side', 'stonecutter_saw', 'stonecutter_side',
+                'stonecutter_side'), 'stonecutter'),
     ]),
 ]
-
-
-def _expand(textures):
-    """One / three / four texture names -> the six faces, in face_id order."""
-    if isinstance(textures, str):
-        return (textures,) * 6
-    if len(textures) == 3:
-        top, side, bottom = textures
-        front = side
-    else:
-        top, side, bottom, front = textures
-    faces = [None] * 6
-    faces[TOP] = top
-    faces[BOTTOM] = bottom
-    faces[FRONT] = front
-    faces[BACK] = faces[RIGHT] = faces[LEFT] = side
-    return tuple(faces)
 
 
 # The two-block plants, lower -> upper. The same wiring the doors get from
