@@ -63,11 +63,17 @@ def column_seal_limit(blocks, opaque, x, z, cover):
     lets the mesher seal a neighbor chunk it only ever reads one layer of.
 
     Only blocks you cannot see through count as cover, so a glass roof does not
-    let the far LOD fill the cave under it back in.
+    let the far LOD fill the cave under it back in — and **only terrain counts,
+    not foliage**, which is what `opaque == 1` says (see blocks.OPAQUE, where 2
+    is the leaf group). A canopy is not a cave roof: a mega spruce's crown is
+    thirteen rows deep, so counting its leaves as cover put the limit *above the
+    ground*, and everything under the tree — including the open air you can walk
+    through between the skirt and the grass — came back as stone the moment the
+    chunk dropped to the far LOD.
     """
     seen = 0
     for y in range(CHUNK_HEIGHT - 1, -1, -1):
-        if opaque[blocks[x, y, z]] != 0:
+        if opaque[blocks[x, y, z]] == 1:
             seen += 1
             if seen == cover:
                 return y - 1

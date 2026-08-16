@@ -454,11 +454,21 @@ B_UNDER = _biome_table(
 
 # How often a column grows a tree, per 10 000. A canopy is 5 wide, so anything
 # over ~600 is a closed roof of leaves rather than a forest.
+#
+# The reference states these as attempts per chunk (`vegetation/trees_*.json`'s
+# `count_extra`), which is 256 columns, so its number times 39 is the figure in
+# this table: forest 10 -> 391, taiga 10 -> 391, savanna 1 -> 43. Two of ours
+# were a long way off and both showed: plains asks for 0.05 attempts a chunk and
+# had 22 (a plains with a wood in it), windswept hills asks for 0.1 and had 40.
+# Jungle and dark forest go the other way — 50 and 16 attempts a chunk are 1950
+# and 625 — and there we stop short of the reference on purpose, because those
+# are attempts against a canopy that mostly rejects them and ours is a straight
+# per-column roll that does not.
 B_TREES = _biome_table(
     0,
-    PLAINS=22, FOREST=340, BIRCH_FOREST=320, DARK_FOREST=380, TAIGA=300,
-    SNOWY_TAIGA=240, JUNGLE=420, SAVANNA=45, SWAMP=150, MEADOW=14,
-    WINDSWEPT_HILLS=40, GROVE=280, SNOWY_PLAINS=4, BADLANDS=3,
+    PLAINS=8, FOREST=380, BIRCH_FOREST=360, DARK_FOREST=450, TAIGA=340,
+    SNOWY_TAIGA=260, JUNGLE=520, SAVANNA=43, SWAMP=90, MEADOW=14,
+    WINDSWEPT_HILLS=15, GROVE=300, SNOWY_PLAINS=4, BADLANDS=3,
 )
 
 # ---------------------------------------------------------------------------
@@ -474,60 +484,95 @@ B_TREES = _biome_table(
 # crowns, each with its own per-tree ranges.
 (TS_NONE, TS_OAK, TS_BIRCH, TS_SPRUCE, TS_PINE, TS_JUNGLE, TS_ACACIA,
  TS_DARK_OAK, TS_FANCY, TS_MEGA_SPRUCE, TS_MEGA_JUNGLE, TS_BUSH, TS_FALLEN,
- TS_CHERRY, TS_MUSHROOM) = range(15)
+ TS_CHERRY, TS_MUSHROOM, TS_SUPER_BIRCH, TS_SWAMP_OAK, TS_MEGA_PINE,
+ TS_FLAT_MUSHROOM) = range(19)
+TS_COUNT = 19
+
+# The last four are the reference's own separate configured features, not
+# variations invented here, and each is a different tree rather than a taller
+# one: `super_birch_bees` (old growth birch, meadow) runs to 13 logs where the
+# plain birch stops at 7; `swamp_oak` carries a radius-3 crown, which is why the
+# wiki counts 137 leaves on it against a plain oak's 56; `mega_pine` is a mega
+# spruce with a 3-7 crown instead of a 13-17 one, so it is a bare column with a
+# tuft where the other is a cone to the ground; and `huge_brown_mushroom` is a
+# flat plate where the red one is a dome.
 
 # No shape may reach further than PAD sideways, or a canopy rooted in the next
 # chunk gets clipped at the seam — the bare-strip bug test_worldgen guards.
-TREE_SLOTS = 4
+# Branch shapes do not try to be lucky about it: `_tip_blob` sizes the ball on
+# the end of a branch from what is left of the budget.
+TREE_SLOTS = 6
 
+# Weights are the reference's `random_selector` chances *after* flattening.
+# Its list is walked in order and each entry is an independent coin — a 0.2 on
+# the second entry only fires if the first one missed — so a table of the raw
+# numbers would be wrong. `trees_birch_and_oak` reads birch 0.2, fancy oak 0.1,
+# else oak; that is 20 / 8 / 72, which is what is written here.
 _TREE_MIX = {
-    # (weight, shape, log, leaf) — weights are the reference's selector chances.
-    'PLAINS':          [(66, TS_OAK, WOOD, LEAVES), (33, TS_FANCY, WOOD, LEAVES),
+    # (weight, shape, log, leaf)
+    # trees_plains: fancy oak 1/3, else oak. Plus the fallen oak the reference
+    # scatters separately (`fallen_oak_tree`).
+    'PLAINS':          [(65, TS_OAK, WOOD, LEAVES), (32, TS_FANCY, WOOD, LEAVES),
                         (3, TS_FALLEN, WOOD, LEAVES)],
-    'FOREST':          [(58, TS_OAK, WOOD, LEAVES), (20, TS_BIRCH, BIRCH_LOG, BIRCH_LEAVES),
-                        (18, TS_FANCY, WOOD, LEAVES), (4, TS_FALLEN, WOOD, LEAVES)],
-    'BIRCH_FOREST':    [(70, TS_BIRCH, BIRCH_LOG, BIRCH_LEAVES),
+    # trees_birch_and_oak
+    'FOREST':          [(69, TS_OAK, WOOD, LEAVES), (20, TS_BIRCH, BIRCH_LOG, BIRCH_LEAVES),
+                        (8, TS_FANCY, WOOD, LEAVES), (3, TS_FALLEN, WOOD, LEAVES)],
+    # trees_birch is birch and nothing else — the oaks that used to be in here
+    # are what stopped a birch forest reading as one.
+    'BIRCH_FOREST':    [(96, TS_BIRCH, BIRCH_LOG, BIRCH_LEAVES),
+                        (4, TS_FALLEN, BIRCH_LOG, BIRCH_LEAVES)],
+    # dark_forest_vegetation: brown mushroom .025, red .05, dark oak 2/3,
+    # birch .2, fancy oak .1, else oak -> 2.5 / 4.9 / 61.8 / 6.2 / 2.5 / 22.1.
+    'DARK_FOREST':     [(62, TS_DARK_OAK, DARK_OAK_LOG, DARK_OAK_LEAVES),
                         (22, TS_OAK, WOOD, LEAVES),
-                        (5, TS_FANCY, WOOD, LEAVES),
-                        (3, TS_FALLEN, BIRCH_LOG, BIRCH_LEAVES)],
-    # Dark forest is dark oak under a roof of leaves, with the huge mushrooms
-    # the reference scatters through it (`dark_forest_vegetation`).
-    'DARK_FOREST':     [(64, TS_DARK_OAK, DARK_OAK_LOG, DARK_OAK_LEAVES),
-                        (16, TS_OAK, WOOD, LEAVES),
-                        (12, TS_MUSHROOM, BONE_BLOCK, RED_MUSHROOM_BLOCK),
-                        (8, TS_MUSHROOM, BONE_BLOCK, BROWN_MUSHROOM_BLOCK)],
-    'TAIGA':           [(56, TS_SPRUCE, SPRUCE_LOG, SPRUCE_LEAVES),
-                        (30, TS_PINE, SPRUCE_LOG, SPRUCE_LEAVES),
-                        (10, TS_MEGA_SPRUCE, SPRUCE_LOG, SPRUCE_LEAVES),
-                        (4, TS_FALLEN, SPRUCE_LOG, SPRUCE_LEAVES)],
+                        (6, TS_BIRCH, BIRCH_LOG, BIRCH_LEAVES),
+                        (5, TS_MUSHROOM, BONE_BLOCK, RED_MUSHROOM_BLOCK),
+                        (3, TS_FLAT_MUSHROOM, BONE_BLOCK, BROWN_MUSHROOM_BLOCK),
+                        (2, TS_FANCY, WOOD, LEAVES)],
+    # trees_taiga: pine 1/3, else spruce. The megas belong to old growth taiga,
+    # which we have no biome for, so they are a rarity here rather than a third
+    # of the forest — one is ~550 leaves and a stand of them is a wall.
+    'TAIGA':           [(60, TS_SPRUCE, SPRUCE_LOG, SPRUCE_LEAVES),
+                        (32, TS_PINE, SPRUCE_LOG, SPRUCE_LEAVES),
+                        (3, TS_MEGA_SPRUCE, SPRUCE_LOG, SPRUCE_LEAVES),
+                        (2, TS_MEGA_PINE, SPRUCE_LOG, SPRUCE_LEAVES),
+                        (3, TS_FALLEN, SPRUCE_LOG, SPRUCE_LEAVES)],
     # Everything that grows where it snows carries the snow-topped leaf. It is
     # the same tree; only the block's up-face differs, so a canopy shows white
     # exactly where it is exposed to the sky and green underneath.
-    'SNOWY_TAIGA':     [(62, TS_SPRUCE, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES),
-                        (34, TS_PINE, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES),
+    'SNOWY_TAIGA':     [(63, TS_SPRUCE, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES),
+                        (33, TS_PINE, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES),
                         (4, TS_FALLEN, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES)],
-    'GROVE':           [(66, TS_SPRUCE, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES),
-                        (34, TS_PINE, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES)],
+    'GROVE':           [(67, TS_SPRUCE, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES),
+                        (33, TS_PINE, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES)],
     'SNOWY_PLAINS':    [(100, TS_SPRUCE, SPRUCE_LOG, SNOWY_SPRUCE_LEAVES)],
-    'JUNGLE':          [(44, TS_JUNGLE, JUNGLE_LOG, JUNGLE_LEAVES),
-                        (26, TS_BUSH, JUNGLE_LOG, JUNGLE_LEAVES),
-                        (24, TS_MEGA_JUNGLE, JUNGLE_LOG, JUNGLE_LEAVES),
-                        (6, TS_FANCY, WOOD, LEAVES)],
+    # trees_jungle: fancy oak .1, bush .5, mega jungle 1/3, else jungle
+    # -> 10 / 45 / 15 / 30. The bushes are what fill the floor under a canopy
+    # that is otherwise all at one height.
+    'JUNGLE':          [(45, TS_BUSH, JUNGLE_LOG, JUNGLE_LEAVES),
+                        (30, TS_JUNGLE, JUNGLE_LOG, JUNGLE_LEAVES),
+                        (15, TS_MEGA_JUNGLE, JUNGLE_LOG, JUNGLE_LEAVES),
+                        (10, TS_FANCY, WOOD, LEAVES)],
+    # trees_savanna: acacia .8, else oak.
     'SAVANNA':         [(80, TS_ACACIA, ACACIA_LOG, ACACIA_LEAVES),
                         (20, TS_OAK, WOOD, LEAVES)],
-    'SWAMP':           [(74, TS_OAK, WOOD, LEAVES),
-                        (14, TS_MUSHROOM, BONE_BLOCK, BROWN_MUSHROOM_BLOCK),
-                        (12, TS_FALLEN, WOOD, LEAVES)],
-    # The reference's meadow is super-birch and fancy oak. Cherry groves border
-    # meadows there, and cherry is the one wood set we had no use for.
-    'MEADOW':          [(46, TS_BIRCH, BIRCH_LOG, BIRCH_LEAVES),
-                        (34, TS_FANCY, WOOD, LEAVES),
+    # trees_swamp is the wide-crowned swamp oak and only that.
+    'SWAMP':           [(87, TS_SWAMP_OAK, WOOD, LEAVES),
+                        (8, TS_FALLEN, WOOD, LEAVES),
+                        (5, TS_FLAT_MUSHROOM, BONE_BLOCK, BROWN_MUSHROOM_BLOCK)],
+    # meadow_trees: super birch .5, else oak. Cherry groves border meadows
+    # there, and cherry is the one wood set we had no other use for.
+    'MEADOW':          [(45, TS_SUPER_BIRCH, BIRCH_LOG, BIRCH_LEAVES),
+                        (35, TS_OAK, WOOD, LEAVES),
                         (20, TS_CHERRY, CHERRY_LOG, CHERRY_LEAVES)],
-    'WINDSWEPT_HILLS': [(50, TS_SPRUCE, SPRUCE_LOG, SPRUCE_LEAVES),
+    # trees_windswept_hills: spruce .666, fancy oak .1, else oak.
+    'WINDSWEPT_HILLS': [(64, TS_SPRUCE, SPRUCE_LOG, SPRUCE_LEAVES),
                         (30, TS_OAK, WOOD, LEAVES),
-                        (14, TS_FANCY, WOOD, LEAVES),
-                        (6, TS_FALLEN, SPRUCE_LOG, SPRUCE_LEAVES)],
-    'BADLANDS':        [(100, TS_BUSH, WOOD, AZALEA_LEAVES)],
+                        (3, TS_FANCY, WOOD, LEAVES),
+                        (3, TS_FALLEN, SPRUCE_LOG, SPRUCE_LEAVES)],
+    # Wooded badlands is oak on the plateaus and nothing else. The azalea bush
+    # that used to be here is a lush-cave feature and grows nowhere near one.
+    'BADLANDS':        [(100, TS_OAK, WOOD, LEAVES)],
 }
 
 
@@ -1125,33 +1170,55 @@ def _bilerp(grid, k, p, q):
 # Features
 # ---------------------------------------------------------------------------
 @njit(nogil=True, fastmath=True, cache=True)
-def _leaves(blocks, cx, y, cz, r, leaf, wx, wz, fray):
-    """One flat disc of leaves, with a few of its rim cells dropped.
+def _leaves(blocks, cx, y, cz, r, leaf, wx, wz, corner, round_=0):
+    """One row of a canopy — the reference's `FoliagePlacer.placeLeavesRow`.
 
-    Leaves only go where there is air, so a disc never eats a trunk or the
+    A row is the **(2r+1) square**, not a disc. `placeLeavesRow` walks the whole
+    square and the only thing that takes cells out of it is
+    `shouldSkipLocation`, which for every placer used here reduces to "drop the
+    four diagonal corners". `corner` is the chance each one goes: `1.0` is
+    `SpruceFoliagePlacer`'s unconditional cut, `0.5` is `BlobFoliagePlacer`'s
+    coin. Leaves only go where there is air, so a row never eats a trunk or the
     branch it hangs off.
 
-    `limit = r*r + r//2` is the reference's own leaf square: at r=1 and r=2 this
-    is exactly `placeLeavesRow` minus the four corner columns that
-    `BlobFoliagePlacer.shouldSkipLocation` drops (5 and 21 cells), and at r=3 it
-    rounds a little further than the reference does. So the *shape* was already
-    right — what was wrong was `fray`, which used to run at 0.4 to 0.7 and eats
-    from a ring that is more than half the disc. A canopy with two fifths of its
-    outer ring missing does not read as a species with a full crown; it reads as
-    a tree that something has been at. The reference removes four cells per
-    layer and no more, so these are down to a tenth or a quarter, and only the
-    shapes whose character *is* an open crown — cherry — keep the high value.
+    **The coin is where a forest's variety comes from.** It is drawn per corner,
+    per row, so two oaks of the same height differ in up to 2^12 ways instead of
+    being the same stamp — which is exactly what a wood of identical trees was.
+    It is drawn from the *tree's* world position for the same reason every other
+    number here is: both chunks either side of a seam have to derive the same
+    tree, so a hash of the leaf cell's own absolute position would be fine but a
+    counter or a chunk coordinate would not.
+
+    This used to be a disc with a `fray` that thinned the whole rim. At r<=2 the
+    disc and the square agree exactly (5 and 21 cells, which is the reference's
+    own count), so the shape was only wrong from r=3 up — but the fray was wrong
+    everywhere, because a rim eaten at a uniform rate reads as damage, where
+    four missing corners read as a crown.
+
+    `round_` cuts the square back to a disc and moves the coin to the whole rim,
+    which is the one placer that does that: `CherryFoliagePlacer` has a
+    `cornerHoleChance` and a circular bottom layer, and being able to see sky
+    through it is the entire character of the tree.
     """
     if r < 0:
         return
     limit = r * r + r // 2
     for dx in range(-r, r + 1):
         for dz in range(-r, r + 1):
-            d2 = dx * dx + dz * dz
-            if d2 > limit:
-                continue
-            if d2 > limit - r - 1 and fast_rand(wx + dx, y * 7.0 + 3.0, wz + dz) < fray:
-                continue
+            if round_ != 0:
+                d2 = dx * dx + dz * dz
+                if d2 > limit:
+                    continue
+                if (d2 > limit - r and corner > 0.0
+                        and fast_rand(wx + dx * 3.0, y * 7.0 + 3.0,
+                                      wz + dz * 3.0) < corner):
+                    continue
+            elif r > 0 and (dx == r or dx == -r) and (dz == r or dz == -r):
+                if corner >= 1.0:
+                    continue
+                if fast_rand(wx + dx * 3.0, y * 7.0 + 3.0,
+                             wz + dz * 3.0) < corner:
+                    continue
             if _get(blocks, cx + dx, y, cz + dz) == AIR:
                 _put(blocks, cx + dx, y, cz + dz, leaf)
 
@@ -1163,11 +1230,63 @@ def _trunk(blocks, lx, lz, y0, y1, log):
 
 
 @njit(nogil=True, fastmath=True, cache=True)
-def _blob(blocks, cx, cy, cz, r, leaf, wx, wz):
-    """A squashed sphere of leaves — the reference's blob_foliage_placer."""
-    for dy in range(-1, 2):
-        _leaves(blocks, cx, cy + dy, cz, r if dy == 0 else r - 1, leaf,
-                wx, wz + dy * 13, 0.12)
+def _blob(blocks, cx, attach_y, cz, r, leaf, wx, wz):
+    """`blob_foliage_placer` — the oak / birch / jungle crown, and the ball on
+    the end of a fancy oak's branch.
+
+    Four rows down from the attachment at r-1, r-1, r, r, which is what its
+    `max(radius - 1 - i/2, 0)` works out to at height 3. The attachment sits one
+    block above the last log, which is the wiki's "canopies grow 1 block higher
+    than the highest log block". The top row always loses its corners
+    (`shouldSkipLocation`'s `localY == 0` term); the rest coin for them.
+    """
+    if r < 0:
+        return
+    _leaves(blocks, cx, attach_y, cz, r - 1, leaf, wx, wz, 1.0)
+    _leaves(blocks, cx, attach_y - 1, cz, r - 1, leaf, wx, wz, 0.5)
+    _leaves(blocks, cx, attach_y - 2, cz, r, leaf, wx, wz, 0.5)
+    _leaves(blocks, cx, attach_y - 3, cz, r, leaf, wx, wz, 0.5)
+
+
+@njit(nogil=True, fastmath=True, cache=True)
+def _tip_blob(blocks, lx, lz, bx, by, bz, r, leaf, wx, wz):
+    """The ball on the end of a branch, shrunk to whatever is left of PAD.
+
+    Four shapes here reach sideways before they put leaves down — fancy oak,
+    mega jungle, cherry, acacia — and a canopy that crosses PAD is one the
+    neighbouring chunk never draws its half of, i.e. a hole at the seam. Rather
+    than pick branch lengths that happen to fit, the ball is sized from the
+    branch: reach two and it is a full blob, reach three and it is a small one.
+    That is also why the branches may vary in length at all.
+    """
+    far = abs(bx - lx)
+    if abs(bz - lz) > far:
+        far = abs(bz - lz)
+    if r > PAD - far:
+        r = PAD - far
+    _blob(blocks, bx, by, bz, r, leaf, wx, wz)
+
+
+@njit(nogil=True, fastmath=True, cache=True)
+def _acacia_plate(blocks, cx, cy, cz, r, leaf, wx, wz):
+    """`acacia_foliage_placer`: a wide flat plate with a cross laid on top.
+
+    Its `shouldSkipLocation` keeps, on the upper row, only the two axes and the
+    3x3 core — so the plate's outline is a square and the layer above it is a
+    plus. That silhouette, seen edge-on against a savanna sky, is the whole
+    tree; two small round blobs with a gap between them (which is what the
+    forking arms used to grow) is a different plant entirely.
+    """
+    if r < 1:
+        return
+    _leaves(blocks, cx, cy - 1, cz, r, leaf, wx, wz, 1.0)
+    rr = r - 1
+    for dx in range(-rr, rr + 1):
+        for dz in range(-rr, rr + 1):
+            if (dx > 1 or dx < -1 or dz > 1 or dz < -1) and dx != 0 and dz != 0:
+                continue
+            if _get(blocks, cx + dx, cy, cz + dz) == AIR:
+                _put(blocks, cx + dx, cy, cz + dz, leaf)
 
 
 @njit(nogil=True, fastmath=True, cache=True)
@@ -1201,13 +1320,14 @@ def place_tree(blocks, lx, base_y, lz, shape, log, leaf, wx, wz):
     depended on the chunk, or on a counter, would give the two halves different
     trees.
 
-    Nothing may reach further than PAD sideways. The widest shapes here
-    (acacia's forked arms, fancy oak's branches, the 2x2 giants) are all exactly
-    at that limit by construction.
+    Nothing may reach further than PAD sideways. The crowns that sit over the
+    trunk are inside it by radius; the four shapes that branch first and grow
+    leaves afterwards go through `_tip_blob`, which sizes the ball from what the
+    branch has already spent.
     """
     if shape == TS_NONE:
         return
-    if base_y + 24 >= CHUNK_HEIGHT:
+    if base_y + 30 >= CHUNK_HEIGHT:
         return
 
     if shape == TS_FALLEN:
@@ -1217,8 +1337,8 @@ def place_tree(blocks, lx, base_y, lz, shape, log, leaf, wx, wz):
         # pillars on a lawn.
         length = 3 + int(fast_rand(wx, 61.0, wz) * 3)
         axis = int(fast_rand(wx, 67.0, wz) * 4)
-        step_x = 1 if axis == 0 else (-1 if axis == 1 else 0)
-        step_z = 1 if axis == 2 else (-1 if axis == 3 else 0)
+        step_x = (1, 0, -1, 0)[axis]
+        step_z = (0, 1, 0, -1)[axis]
         for i in range(length):
             x = lx + step_x * i
             z = lz + step_z * i
@@ -1228,185 +1348,318 @@ def place_tree(blocks, lx, base_y, lz, shape, log, leaf, wx, wz):
         return
 
     if shape == TS_BUSH:
+        # jungle_bush: one or two logs under a squat two-row blob. It is the
+        # smallest thing the reference calls a tree and it is 45% of a jungle,
+        # because a canopy all at one height needs something underneath it.
         height = 1 + int(fast_rand(wx, 73.0, wz) * 2)
         _trunk(blocks, lx, lz, base_y, base_y + height - 1, log)
-        _blob(blocks, lx, base_y + height, lz, 2, leaf, wx, wz)
+        _leaves(blocks, lx, base_y + height, lz, 1, leaf, wx, wz, 1.0)
+        _leaves(blocks, lx, base_y + height - 1, lz, 2, leaf, wx, wz, 0.5)
         _put(blocks, lx, base_y - 1, lz, DIRT)
         return
 
-    if shape == TS_MUSHROOM:
-        # Huge mushroom: a pale stem under a domed cap. We have no stem block,
-        # so the caller passes bone for it — the texture is the closest match in
-        # the table and at a distance it reads exactly right.
-        stem = 3 + int(fast_rand(wx, 77.0, wz) * 3)
-        top = base_y + stem
-        _trunk(blocks, lx, lz, base_y, top - 1, log)
-        _leaves(blocks, lx, top, lz, 3, leaf, wx, wz, 0.0)
-        _leaves(blocks, lx, top + 1, lz, 2, leaf, wx, wz, 0.0)
+    if shape == TS_MUSHROOM or shape == TS_FLAT_MUSHROOM:
+        # huge_red_mushroom is a dome on a short stem; huge_brown_mushroom is a
+        # flat plate on a shorter one and half again as wide. They were the same
+        # shape in two colours, which wasted the only two plants in the dark
+        # forest that are not trees. We have no stem block, so the caller passes
+        # bone — the closest texture in the table, and at any distance it reads
+        # exactly right.
+        if shape == TS_MUSHROOM:
+            stem = 4 + int(fast_rand(wx, 77.0, wz) * 4)
+            top = base_y + stem - 1
+            _trunk(blocks, lx, lz, base_y, top, log)
+            _leaves(blocks, lx, top, lz, 2, leaf, wx, wz, 0.0, 1)
+            _leaves(blocks, lx, top + 1, lz, 2, leaf, wx, wz, 0.0, 1)
+            _leaves(blocks, lx, top + 2, lz, 1, leaf, wx, wz, 1.0)
+        else:
+            stem = 3 + int(fast_rand(wx, 77.0, wz) * 3)
+            top = base_y + stem - 1
+            _trunk(blocks, lx, lz, base_y, top, log)
+            _leaves(blocks, lx, top + 1, lz, 3, leaf, wx, wz, 0.0, 1)
         _put(blocks, lx, base_y - 1, lz, DIRT)
         return
 
     # --- everything below has a trunk and a crown ---------------------------
-    # base_height + height_rand, from the reference's own trunk placers
-    # (`configured_feature/{oak,birch,spruce,pine,...}.json`). These had drifted
-    # two to four blocks tall each — a birch at 6-9 against the reference's 5-6
-    # is a different tree, and the extra height is also what put the mesher's
-    # sweep bound up.
+    # Logs in the trunk, from the reference's own trunk placers
+    # (`configured_feature/{oak,birch,spruce,pine,...}.json`). Each is
+    # `base + rand(a) [+ rand(b)]`, and where there are two draws they are two
+    # draws here as well: summing two uniforms is a triangular distribution, so
+    # a spruce is usually mid-height and only rarely at either end, which is not
+    # what one wider uniform gives.
     if shape == TS_OAK:
-        trunk = 4 + int(fast_rand(wx, 91.0, wz) * 3)          # 4 + rand(2)
+        trunk = 4 + int(fast_rand(wx, 91.0, wz) * 3)           # 4 + rand(2)
+    elif shape == TS_SWAMP_OAK:
+        trunk = 5 + int(fast_rand(wx, 91.0, wz) * 4)           # 5 + rand(3)
     elif shape == TS_BIRCH:
-        trunk = 5 + int(fast_rand(wx, 91.0, wz) * 3)          # 5 + rand(2)
+        trunk = 5 + int(fast_rand(wx, 91.0, wz) * 3)           # 5 + rand(2)
+    elif shape == TS_SUPER_BIRCH:
+        trunk = (5 + int(fast_rand(wx, 91.0, wz) * 3)
+                 + int(fast_rand(wx, 89.0, wz) * 7))           # 5 + rand(2)+rand(6)
     elif shape == TS_SPRUCE:
-        trunk = 6 + int(fast_rand(wx, 91.0, wz) * 4)          # 5 + rand(2)+rand(1)
+        trunk = (5 + int(fast_rand(wx, 91.0, wz) * 3)
+                 + int(fast_rand(wx, 89.0, wz) * 2))           # 5 + rand(2)+rand(1)
     elif shape == TS_PINE:
-        trunk = 7 + int(fast_rand(wx, 91.0, wz) * 5)          # 6 + rand(4)
+        trunk = 6 + int(fast_rand(wx, 91.0, wz) * 5)           # 6 + rand(4)
     elif shape == TS_JUNGLE:
-        trunk = 5 + int(fast_rand(wx, 91.0, wz) * 8)          # 4 + rand(8)
+        trunk = 4 + int(fast_rand(wx, 91.0, wz) * 9)           # 4 + rand(8)
     elif shape == TS_ACACIA:
-        trunk = 5 + int(fast_rand(wx, 91.0, wz) * 4)          # 5 + rand(2)+rand(2)
+        trunk = (5 + int(fast_rand(wx, 91.0, wz) * 3)
+                 + int(fast_rand(wx, 89.0, wz) * 3))           # 5 + rand(2)+rand(2)
     elif shape == TS_DARK_OAK:
-        trunk = 6 + int(fast_rand(wx, 91.0, wz) * 3)          # 6 + rand(2)+rand(1)
+        trunk = 6 + int(fast_rand(wx, 91.0, wz) * 3)           # "typically 6-8"
     elif shape == TS_FANCY:
-        trunk = 7 + int(fast_rand(wx, 91.0, wz) * 5)
-    elif shape == TS_MEGA_SPRUCE:
-        trunk = 12 + int(fast_rand(wx, 91.0, wz) * 5)
+        trunk = 6 + int(fast_rand(wx, 91.0, wz) * 7)           # 3 + rand(11), floored
+    elif shape == TS_MEGA_SPRUCE or shape == TS_MEGA_PINE:
+        trunk = 13 + int(fast_rand(wx, 91.0, wz) * 7)          # 13 + rand(2)+rand(14)
     elif shape == TS_MEGA_JUNGLE:
-        trunk = 11 + int(fast_rand(wx, 91.0, wz) * 4)
+        trunk = 10 + int(fast_rand(wx, 91.0, wz) * 8)          # 10 + rand(2)+rand(19)
     else:                                    # TS_CHERRY
-        trunk = 6 + int(fast_rand(wx, 91.0, wz) * 3)          # 7 + rand(1)
+        trunk = 7 + int(fast_rand(wx, 91.0, wz) * 3)           # 7 + rand(1)
 
-    top = base_y + trunk
-    if top + 4 >= CHUNK_HEIGHT:
+    # `trunk` is the log count, so the last log is one below base + trunk and
+    # the crown attaches one above it — "canopies grow 1 block higher than the
+    # highest log block".
+    top = base_y + trunk - 1
+    if top + 6 >= CHUNK_HEIGHT:
         return
 
-    if shape == TS_OAK or shape == TS_BIRCH or shape == TS_JUNGLE:
-        # blob_foliage_placer: two full rings, then a narrow cap.
-        # blob_foliage_placer at radius 2, height 3: four rows, 2-2-1-1 down
-        # from the top, which is what its `radius - 1 - i/2` works out to.
-        _leaves(blocks, lx, top - 2, lz, 2, leaf, wx, wz, 0.10)
-        _leaves(blocks, lx, top - 1, lz, 2, leaf, wx, wz, 0.10)
-        _leaves(blocks, lx, top, lz, 1, leaf, wx, wz, 0.0)
-        _leaves(blocks, lx, top + 1, lz, 1, leaf, wx, wz, 0.25)
-        if shape == TS_JUNGLE and trunk > 9:
-            # A tuft partway up the bare stem, so a tall jungle trunk is not a
-            # pole with a hat.
-            _leaves(blocks, lx, base_y + trunk // 2, lz, 2, leaf, wx, wz, 0.35)
+    if (shape == TS_OAK or shape == TS_BIRCH or shape == TS_JUNGLE
+            or shape == TS_SUPER_BIRCH or shape == TS_SWAMP_OAK):
+        # blob_foliage_placer at radius 2 — or 3 for the swamp oak, which is the
+        # whole difference between the wiki's 56-leaf oak and its 137-leaf one.
         _trunk(blocks, lx, lz, base_y, top, log)
+        _blob(blocks, lx, top + 1, lz, 3 if shape == TS_SWAMP_OAK else 2,
+              leaf, wx, wz)
 
-    elif shape == TS_SPRUCE or shape == TS_PINE:
-        # spruce_foliage_placer / pine_foliage_placer: rings that taper to the
-        # top, notched on alternate layers. Spruce is skirted almost to the
-        # ground, pine keeps a bare stem and a small crown — the reference makes
-        # them a 2:1 mix in taiga and it is what gives a conifer forest depth.
-        # pine_foliage_placer is radius 1, height 3-4 — a tuft on a bare stem,
-        # and deliberately nothing like the spruce beside it. It used to be
-        # given a spruce's crown at width 3, which made the taiga's 2:1 mix two
-        # of the same tree.
-        if shape == TS_PINE:
-            crown = 3 + int(fast_rand(wx, 93.0, wz) * 2)
-            wide = 1
-        else:
-            crown = 5 + int(fast_rand(wx, 93.0, wz) * 4)
-            wide = 2 + int(fast_rand(wx, 95.0, wz) * 2)
-        if crown > trunk:
-            crown = trunk
-        for i in range(crown):
-            y = top - crown + 1 + i
-            down = crown - 1 - i
-            r = 1 + (down * wide) // max(1, crown - 1)
-            if down % 2 == 1:
-                r -= 1
-            _leaves(blocks, lx, y, lz, r, leaf, wx, wz, 0.10)
-        _leaves(blocks, lx, top + 1, lz, 0, leaf, wx, wz, 0.0)
+    elif shape == TS_SPRUCE:
+        # spruce_foliage_placer, written out. The radius does not taper
+        # linearly: it climbs to a running cap, drops back, and the cap then
+        # rises by one — a sawtooth, which is where a spruce's notched skirt
+        # comes from. Three of its four numbers are drawn per tree, so no two
+        # spruces in a stand have their notches at the same heights.
+        #
+        # What this replaced tapered linearly and then subtracted one on
+        # alternate rows, which could and did land on r=0 *in the middle of the
+        # crown* — and r=0 over a trunk places nothing at all, so a third of the
+        # taiga had a bare ring sawn through it. The sawtooth cannot: it only
+        # reaches 0 on its first reset, which is above the last log.
         _trunk(blocks, lx, lz, base_y, top, log)
+        maxr = 2 + int(fast_rand(wx, 93.0, wz) * 2)            # UniformInt(2,3)
+        off = int(fast_rand(wx, 95.0, wz) * 3)                 # UniformInt(0,2)
+        fh = trunk - 1 - int(fast_rand(wx, 97.0, wz) * 2)      # height - trunkHeight
+        if fh < 4:
+            fh = 4
+        r = int(fast_rand(wx, 99.0, wz) * 2)                   # nextInt(2)
+        j = 1
+        k = 0
+        attach = top + 1
+        for i in range(off, -fh - 1, -1):
+            if attach + i > base_y:
+                _leaves(blocks, lx, attach + i, lz, r, leaf, wx, wz, 1.0)
+            if r >= j:
+                r = k
+                k = 1
+                j = min(j + 1, maxr)
+            else:
+                r += 1
+
+    elif shape == TS_PINE:
+        # pine_foliage_placer: radius 1, three or four rows — a tuft on a bare
+        # stem and deliberately nothing like the spruce beside it. The reference
+        # makes them a 2:1 mix in taiga and the contrast is the point; giving
+        # the pine a spruce's crown made that mix two of the same tree. Ten
+        # leaves, which is the wiki's count for the matchstick spruce.
+        _trunk(blocks, lx, lz, base_y, top, log)
+        fh = 3 + int(fast_rand(wx, 93.0, wz) * 2)              # UniformInt(3,4)
+        attach = top + 1
+        r = 0
+        for i in range(1, -fh, -1):
+            _leaves(blocks, lx, attach + i, lz, r, leaf, wx, wz, 1.0)
+            if r >= 1 and i == 2 - fh:
+                r -= 1
+            elif r < 1:
+                r += 1
 
     elif shape == TS_ACACIA:
-        # forking_trunk_placer + acacia_foliage_placer: the stem forks and each
-        # arm carries a flat plate, which is the whole silhouette of a savanna.
-        _trunk(blocks, lx, lz, base_y, top, log)
-        arms = 1 + int(fast_rand(wx, 97.0, wz) * 2)
-        for arm in range(arms):
-            dir_i = int(fast_rand(wx, 101.0 + arm * 7.0, wz) * 8)
-            step_x = (1, 1, 0, -1, -1, -1, 0, 1)[dir_i]
-            step_z = (0, 1, 1, 1, 0, -1, -1, -1)[dir_i]
-            reach = 2
-            ax, az, ay = lx, lz, top
-            for i in range(reach):
-                ax += step_x
-                az += step_z
-                ay += 1
-                _put(blocks, ax, ay, az, log)
-            _leaves(blocks, ax, ay + 1, az, 2, leaf, wx, wz, 0.10)
-            _leaves(blocks, ax, ay + 2, az, 1, leaf, wx, wz, 0.25)
+        # forking_trunk_placer: the stem runs up, then *leans* one block per
+        # level in a cardinal direction, and a second fork peels off lower down
+        # in a different one. The lean was eight-way here, and a trunk that
+        # leans diagonally reads as a tree that has been pushed over.
+        bend = trunk - 1 - int(fast_rand(wx, 97.0, wz) * 3)
+        if bend < 2:
+            bend = 2
+        # The reference leans up to three blocks and then hangs a radius-3 plate
+        # off the end of that, which reaches six. We have four, so the lean is
+        # mostly one — the plate is the recognisable half of the tree and a
+        # two-block lean costs it a ring.
+        lean = 2 if fast_rand(wx, 99.0, wz) < 0.34 else 1
+        d = int(fast_rand(wx, 101.0, wz) * 4)
+        ax, az = lx, lz
+        for y in range(base_y, top + 1):
+            step = y - base_y - bend
+            if 0 <= step < lean:
+                ax += (1, 0, -1, 0)[d]
+                az += (0, 1, 0, -1)[d]
+            _put(blocks, ax, y, az, log)
+        _acacia_plate(blocks, ax, top + 2, az, min(3, PAD - lean), leaf, wx, wz)
+        d2 = int(fast_rand(wx, 103.0, wz) * 4)
+        if d2 != d:
+            # The second fork starts below the first's bend and is shorter, so
+            # the two plates sit at different heights — that stagger is most of
+            # what tells one acacia from the next.
+            run = 1 + int(fast_rand(wx, 107.0, wz) * 2)
+            fy = base_y + bend - 1 - int(fast_rand(wx, 109.0, wz) * 2)
+            if fy < base_y + 2:
+                fy = base_y + 2
+            fx, fz = lx, lz
+            for i in range(run):
+                fx += (1, 0, -1, 0)[d2]
+                fz += (0, 1, 0, -1)[d2]
+                fy += 1
+                _put(blocks, fx, fy, fz, log)
+            _acacia_plate(blocks, fx, fy + 2, fz, min(3, PAD - run), leaf, wx, wz)
 
-    elif shape == TS_DARK_OAK or shape == TS_MEGA_SPRUCE or shape == TS_MEGA_JUNGLE:
-        # giant_trunk_placer: 2x2. The crown is drawn twice, once about each
-        # diagonal corner, which covers the square without needing a radius that
-        # would overrun PAD.
+    elif shape == TS_DARK_OAK:
+        # giant_trunk_placer, 2x2, plus the stubby branches the wiki calls
+        # "irregular logs, representing large branches ... nearly always
+        # present". dark_oak_foliage_placer then lays rows of 2, 3, 2 about both
+        # diagonal corners and sometimes a fourth at 1 — drawing the crown twice
+        # covers the square without a radius that would overrun PAD, and radius
+        # 3 about lx+1 reaches exactly it.
+        for ox2 in range(2):
+            for oz2 in range(2):
+                _trunk(blocks, lx + ox2, lz + oz2, base_y, top, log)
+                _put(blocks, lx + ox2, base_y - 1, lz + oz2, DIRT)
+        for b in range(1 + int(fast_rand(wx, 97.0, wz) * 2)):
+            d = int(fast_rand(wx, 101.0 + b * 9.0, wz) * 4)
+            sx = (1, 0, -1, 0)[d]
+            sz = (0, 1, 0, -1)[d]
+            bx = lx + (1 if sx > 0 else 0) + sx
+            bz = lz + (1 if sz > 0 else 0) + sz
+            _put(blocks, bx, top, bz, log)
+            _put(blocks, bx, top - 1, bz, log)
+        for i in range(3):
+            r = (2, 3, 2)[i]
+            _leaves(blocks, lx, top - 1 + i, lz, r, leaf, wx, wz, 0.5)
+            _leaves(blocks, lx + 1, top - 1 + i, lz + 1, r, leaf, wx, wz, 0.5)
+        if fast_rand(wx, 99.0, wz) < 0.5:
+            _leaves(blocks, lx, top + 2, lz, 1, leaf, wx, wz, 1.0)
+            _leaves(blocks, lx + 1, top + 2, lz + 1, 1, leaf, wx, wz, 1.0)
+        return
+
+    elif shape == TS_MEGA_SPRUCE or shape == TS_MEGA_PINE:
+        # mega_pine_foliage_placer: the radius grows straight down the crown,
+        # `radius + floor(k / crown * 3.5)`, so it is a cone and not a stack of
+        # rings. The two configured features differ in one number and in nothing
+        # else — the mega spruce's crown is 13-17 rows and skirts nearly to the
+        # ground, the mega pine's is 3-7 and leaves a bare column under it.
+        # 3.5 rounds up to a radius of 4; ours stops at 3, because 3 about the
+        # far corner of a 2x2 trunk is already PAD.
         for ox2 in range(2):
             for oz2 in range(2):
                 _trunk(blocks, lx + ox2, lz + oz2, base_y, top, log)
                 _put(blocks, lx + ox2, base_y - 1, lz + oz2, DIRT)
         if shape == TS_MEGA_SPRUCE:
-            crown = 7 + int(fast_rand(wx, 93.0, wz) * 4)
-            for i in range(crown):
-                y = top - crown + 1 + i
-                down = crown - 1 - i
-                r = (down * 3) // max(1, crown - 1)
-                if down % 2 == 1 and r > 0:
-                    r -= 1
-                _leaves(blocks, lx, y, lz, r, leaf, wx, wz, 0.10)
-                _leaves(blocks, lx + 1, y, lz + 1, r, leaf, wx, wz, 0.10)
-            _leaves(blocks, lx, top + 1, lz, 0, leaf, wx, wz, 0.0)
-            _leaves(blocks, lx + 1, top + 1, lz + 1, 0, leaf, wx, wz, 0.0)
+            crown = 13 + int(fast_rand(wx, 93.0, wz) * 5)      # UniformInt(13,17)
         else:
-            # dark_oak_foliage_placer: rows of radius 2, 3, 2 about the trunk
-            # and sometimes a fourth at 1. Dark oak's whole character is that the
-            # canopy closes over your head, and two rows of 2 and 1 did not.
-            # Radius 3 about lx+1 reaches exactly PAD.
-            for i in range(3):
-                r = (2, 3, 2)[i]
-                _leaves(blocks, lx, top - 1 + i, lz, r, leaf, wx, wz, 0.10)
-                _leaves(blocks, lx + 1, top - 1 + i, lz + 1, r, leaf, wx, wz, 0.10)
-            if fast_rand(wx, 99.0, wz) < 0.5:
-                _leaves(blocks, lx, top + 2, lz, 1, leaf, wx, wz, 0.25)
-                _leaves(blocks, lx + 1, top + 2, lz + 1, 1, leaf, wx, wz, 0.25)
+            crown = 3 + int(fast_rand(wx, 93.0, wz) * 5)       # UniformInt(3,7)
+        if crown > trunk - 2:
+            crown = trunk - 2
+        attach = top + 1
+        for k in range(crown, -1, -1):
+            r = 1 + (k * 7) // (2 * crown)
+            if r > 3:
+                r = 3
+            _leaves(blocks, lx, attach - k, lz, r, leaf, wx, wz, 1.0)
+            _leaves(blocks, lx + 1, attach - k, lz + 1, r, leaf, wx, wz, 1.0)
+        _leaves(blocks, lx, attach + 1, lz, 0, leaf, wx, wz, 1.0)
+        _leaves(blocks, lx + 1, attach + 1, lz + 1, 0, leaf, wx, wz, 1.0)
+        # alter_ground: the reference lays a disc of podzol under every mega
+        # tree, and it is what stops a giant standing on a lawn.
+        for dx in range(-2, 4):
+            for dz in range(-2, 4):
+                if dx * dx + dz * dz <= 7 or (dx - 1) ** 2 + (dz - 1) ** 2 <= 7:
+                    if _get(blocks, lx + dx, base_y - 1, lz + dz) != AIR:
+                        _put(blocks, lx + dx, base_y - 1, lz + dz, PODZOL)
+        return
+
+    elif shape == TS_MEGA_JUNGLE:
+        # mega_jungle_trunk_placer: a 2x2 stem with branches off its upper half,
+        # each carrying its own blob, and a crown over the top. Without the
+        # branches it is a pole with a hat — which, at 10 to 17 logs, is most of
+        # a jungle's skyline standing bare.
+        for ox2 in range(2):
+            for oz2 in range(2):
+                _trunk(blocks, lx + ox2, lz + oz2, base_y, top, log)
+                _put(blocks, lx + ox2, base_y - 1, lz + oz2, DIRT)
+        for b in range(2 + int(fast_rand(wx, 97.0, wz) * 3)):
+            d = int(fast_rand(wx, 101.0 + b * 7.0, wz) * 4)
+            sx = (1, 0, -1, 0)[d]
+            sz = (0, 1, 0, -1)[d]
+            run = 1 + int(fast_rand(wx, 113.0 + b * 3.0, wz) * 2)
+            by = top - 2 - int(fast_rand(wx, 107.0 + b * 5.0, wz) * (trunk // 2))
+            bx = lx + (1 if sx > 0 else 0)
+            bz = lz + (1 if sz > 0 else 0)
+            for i in range(run):
+                bx += sx
+                bz += sz
+                _put(blocks, bx, by, bz, log)
+            _tip_blob(blocks, lx, lz, bx, by + 2, bz, 2, leaf, wx + b * 13, wz)
+        _blob(blocks, lx, top + 2, lz, 2, leaf, wx, wz)
+        _blob(blocks, lx + 1, top + 2, lz + 1, 2, leaf, wx, wz + 7)
         return
 
     elif shape == TS_FANCY:
         # fancy_trunk_placer: a tall stem with branches angling out of its upper
         # half, each ending in its own blob. This is the big oak, and it is the
-        # one shape whose outline is different every time — no two draws put the
-        # branches in the same places.
+        # one shape whose outline was already different every time. What it
+        # gains here is branches of two lengths rather than one, and the wiki's
+        # "leaves grow 3 blocks higher than the highest log" — which it calls out
+        # for the fancy oak alone.
         _trunk(blocks, lx, lz, base_y, top, log)
-        branches = 3 + int(fast_rand(wx, 97.0, wz) * 2)
-        for branch in range(branches):
-            dir_i = int(fast_rand(wx, 103.0 + branch * 11.0, wz) * 8)
-            step_x = (1, 1, 0, -1, -1, -1, 0, 1)[dir_i]
-            step_z = (0, 1, 1, 1, 0, -1, -1, -1)[dir_i]
-            by = base_y + trunk // 2 + (branch * (trunk // 2)) // branches
+        branches = 2 + int(fast_rand(wx, 97.0, wz) * 3)
+        for b in range(branches):
+            d = int(fast_rand(wx, 103.0 + b * 11.0, wz) * 8)
+            sx = (1, 1, 0, -1, -1, -1, 0, 1)[d]
+            sz = (0, 1, 1, 1, 0, -1, -1, -1)[d]
+            run = 1 + int(fast_rand(wx, 109.0 + b * 7.0, wz) * 2)
+            by = base_y + trunk // 2 + (b * (trunk // 2)) // branches
             bx, bz = lx, lz
-            for i in range(2):
-                bx += step_x
-                bz += step_z
+            for i in range(run):
+                bx += sx
+                bz += sz
                 by += 1
                 _put(blocks, bx, by, bz, log)
-            _blob(blocks, bx, by + 1, bz, 2, leaf, wx + branch, wz)
-        # The crown is wider than a branch blob and sits over the whole tree —
-        # without it a fancy oak is a bare pole with tufts stuck to the side.
-        _leaves(blocks, lx, top - 1, lz, 2, leaf, wx, wz, 0.15)
-        _leaves(blocks, lx, top, lz, 3, leaf, wx, wz, 0.12)
-        _leaves(blocks, lx, top + 1, lz, 2, leaf, wx, wz, 0.12)
-        _leaves(blocks, lx, top + 2, lz, 1, leaf, wx, wz, 0.25)
+            _tip_blob(blocks, lx, lz, bx, by + 2, bz, 2, leaf, wx + b * 17, wz)
+        _leaves(blocks, lx, top + 3, lz, 1, leaf, wx, wz, 1.0)
+        _leaves(blocks, lx, top + 2, lz, 2, leaf, wx, wz, 0.5)
+        _leaves(blocks, lx, top + 1, lz, 3, leaf, wx, wz, 0.15, 1)
+        _leaves(blocks, lx, top, lz, 3, leaf, wx, wz, 0.15, 1)
+        _leaves(blocks, lx, top - 1, lz, 2, leaf, wx, wz, 0.5)
 
     else:                                    # TS_CHERRY
-        # A wide, thin, lacy crown — the cherry's whole character is that you
-        # can see sky through it.
+        # cherry_trunk_placer: one to three branches that run out horizontally
+        # from the upper trunk, each carrying its own crown — the wiki's
+        # "horizontally facing branches", and the reason a cherry "may
+        # occasionally have multiple canopies". cherry_foliage_placer then lays
+        # 1, 2, 3, 3, 2 over the stem with a quarter of the rim out, which is
+        # what makes it lacy rather than a pink brick.
         _trunk(blocks, lx, lz, base_y, top, log)
-        _leaves(blocks, lx, top, lz, 3, leaf, wx, wz, 0.25)
-        _leaves(blocks, lx, top + 1, lz, 3, leaf, wx, wz, 0.25)
-        _leaves(blocks, lx, top + 2, lz, 1, leaf, wx, wz, 0.25)
-        _leaves(blocks, lx, top - 1, lz, 2, leaf, wx, wz, 0.4)
+        for b in range(1 + int(fast_rand(wx, 97.0, wz) * 3)):
+            d = int(fast_rand(wx, 103.0 + b * 13.0, wz) * 4)
+            sx = (1, 0, -1, 0)[d]
+            sz = (0, 1, 0, -1)[d]
+            by = top - 1 - int(fast_rand(wx, 107.0 + b * 5.0, wz) * 3)
+            _put(blocks, lx + sx, by, lz + sz, log)
+            _put(blocks, lx + sx * 2, by, lz + sz * 2, log)
+            _tip_blob(blocks, lx, lz, lx + sx * 2, by + 3, lz + sz * 2, 2,
+                      leaf, wx + b * 19, wz)
+        _leaves(blocks, lx, top + 3, lz, 1, leaf, wx, wz, 0.25)
+        _leaves(blocks, lx, top + 2, lz, 2, leaf, wx, wz, 0.25)
+        _leaves(blocks, lx, top + 1, lz, 3, leaf, wx, wz, 0.25, 1)
+        _leaves(blocks, lx, top, lz, 3, leaf, wx, wz, 0.25, 1)
+        _leaves(blocks, lx, top - 1, lz, 2, leaf, wx, wz, 0.25)
 
     _put(blocks, lx, base_y - 1, lz, DIRT)
 

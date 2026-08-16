@@ -69,7 +69,14 @@ def check_registry():
     assert OPAQUE[8] == 0, 'WATER must not hide a face'
     for bid in blocks.BLOCK_NAMES:
         want = 0 if bid in blocks.TRANSPARENT else 1
-        assert OPAQUE[bid] == want, f'{blocks.BLOCK_NAMES[bid]} is on the wrong side'
+        assert bool(OPAQUE[bid]) == bool(want), \
+            f'{blocks.BLOCK_NAMES[bid]} is on the wrong side'
+        # OPAQUE is a three-value enum, not a flag: foliage hides the face
+        # behind it like any solid block but must not count as cover for the far
+        # LOD's cave sealing, so it carries a 2. Only column_seal_limit reads it.
+        assert (OPAQUE[bid] == 2) == (bid in blocks.FOLIAGE and bid not in
+                                      blocks.TRANSPARENT), \
+            f'{blocks.BLOCK_NAMES[bid]} disagrees with the Yaprak group'
     print(f'registry: {len(blocks.TRANSPARENT)} see-through of '
           f'{len(blocks.BLOCK_NAMES)} blocks')
 

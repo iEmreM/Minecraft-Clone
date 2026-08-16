@@ -561,13 +561,35 @@ ICON_LAYER = {bid: int(FACE_LAYER[bid, FRONT]) for bid in BLOCK_FACES}
 # AIR and WATER never could; the see-through blocks cannot either, which is what
 # keeps the terrain behind a glass wall meshed.
 #
+# It is a small enum rather than a flag, and every caller but one only wants the
+# flag (`!= 0`):
+#
+#   0  see-through — AIR, WATER, the Şeffaf group
+#   1  solid terrain
+#   2  foliage — hides the face behind it, but is *not* cover
+#
+# The one caller that reads the 2 is `fast_builder.column_seal_limit`, and the
+# distinction is load-bearing there. The far LOD fills in air that has
+# SEAL_COVER solid blocks stacked over it, on the grounds that it must be a
+# cave; a leaf column is not a cave roof, and a mega spruce's crown is thirteen
+# rows deep, so counting foliage as cover grew a stone plinth under every
+# distant giant — 42 visible blocks of it, measured. Nothing else needs a second
+# table for that, and a second table would have to be threaded through
+# build_chunk_mesh_fast and its seventeen call sites.
+#
 # Passed into build_chunk_mesh_fast as an argument for the same reason
 # FACE_LAYER is — @njit(cache=True) freezes globals into the cached artifact.
+FOLIAGE = frozenset(bid for name, ids in GROUPS if name == 'Yaprak' for bid in ids)
+assert FOLIAGE, 'the Yaprak group is what defines the foliage blocks'
+
 OPAQUE = np.ones(max(BLOCK_NAMES) + 1, dtype=np.uint8)
 OPAQUE[0] = 0                       # AIR
 OPAQUE[8] = 0                       # WATER — never meshed, see fast_builder
 for _bid in TRANSPARENT:
     OPAQUE[_bid] = 0
+for _bid in FOLIAGE:
+    if OPAQUE[_bid]:                # a see-through leaf would stay 0
+        OPAQUE[_bid] = 2
 
 # Water has no row in the table (it is never meshed — see fast_builder), but the
 # id is needed outside terrain generation: the player walks through it.
