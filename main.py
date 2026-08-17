@@ -6,10 +6,18 @@ from engine.camera import Camera
 from world.modern_chunk import AIR, GRASS, WATER
 from world.blocks import BLOCK_NAMES, COLLIDES, FACING, LOWER, UPPER, WALL_MOUNTED
 from world.threaded_chunk_manager import ThreadedChunkManager
-from world.terrain_generator import find_spawn
+from world.terrain_generator import BIOME_NAMES, column_biome, find_spawn
+from world.shapes import FACING_NAMES
 import glm
 import math
 from engine.hud import HUDRenderer, HOTBAR_SLOTS
+
+try:                                   # the debug screen's memory and CPU lines
+    import psutil
+    _PROC, _RAM = psutil.Process(), psutil.virtual_memory
+    _RAM_MB = _RAM().total >> 20
+except ImportError:                    # not a game dependency; the lines just go
+    _PROC = None
 
 # What the crosshair goes straight through, and what a placed block overwrites.
 # Water is in it for the same reason it is in the real game: the ray does not
@@ -18,6 +26,21 @@ from engine.hud import HUDRenderer, HOTBAR_SLOTS
 # One tuple, because the outline and the placement have to agree — a ray that
 # passes through a block it then refuses to build in targets nothing at all.
 REPLACEABLE = (AIR, WATER)
+
+# Which world axis each compass name points along, for the debug screen.
+LOOK_AXIS = {'north': '-Z', 'east': '+X', 'south': '+Z', 'west': '-X'}
+
+
+def look_direction(yaw):
+    """Compass name and world axis the eye points along, from a camera yaw.
+
+    `Camera.yaw` is 0 down +X and turns toward +Z, while `shapes.FACING_NAMES`
+    starts at -Z — hence the quarter turn. Off by one and the screen still reads
+    plausibly while pointing the player the wrong way, so `test_interaction.py`
+    checks the axis against the front vector the camera itself builds.
+    """
+    name = FACING_NAMES[(int(yaw % 360 + 45) // 90 + 1) % 4]
+    return name, LOOK_AXIS[name]
 
 
 class MinecraftModernGL:
@@ -42,8 +65,20 @@ class MinecraftModernGL:
         self.last_y = height / 2
         self.first_mouse = True
         self.start_time = time.time()
-        self.last_title_update = 0.0
-        
+
+        # Debug screen (F3). The render stats it shows are written by render(),
+        # so they start at zero rather than being missing on the first frame.
+        self.show_debug = False
+        self.last_debug_update = 0.0
+        self.last_cpu_sample = 0.0
+        self.cpu_percent = 0.0
+        self.target = {'hit': False}
+        self.rendered_chunks = self.total_chunks = 0
+        self.frustum_culled = self.triangles = 0
+        info = self.renderer.ctx.info      # ~60 GL queries; once is enough
+        self.gpu = (info['GL_RENDERER'], info['GL_VERSION'])
+
+
         # Movement
         self.movement_speed = 20.0
         self.mouse_sensitivity = 0.3
@@ -90,6 +125,7 @@ class MinecraftModernGL:
         print(f"- 1-{HOTBAR_SLOTS}: Select hotbar slot")
         print("- +/-: Increase/Decrease render distance")
         print("- F: Toggle frustum culling")
+        print("- F3: Debug screen — position, chunk, biome, target, FPS, memory")
         print("")
         print("Physics: Gravity, jumping, and block collision enabled!")
         print("Walking speed: 5 blocks/sec, Flying speed: 15 blocks/sec")
@@ -159,6 +195,11 @@ class MinecraftModernGL:
                         self.toggle_inventory()
                     else:
                         self.toggle_mouse_capture()
+                # Above the picker's branch on purpose: F3 is not a printable
+                # key, so it belongs to the game even while the search box has
+                # the rest of the keyboard.
+                elif event.key == pg.K_F3:
+                    self.show_debug = not self.show_debug
                 elif self.hud.inventory_open:
                     if event.key == pg.K_BACKSPACE:
                         self.hud.set_query(self.hud.query[:-1])
@@ -373,56 +414,86 @@ class MinecraftModernGL:
         # Update chunk loading based on player position
         self.chunk_manager.update(self.camera.position)
 
-        self.update_title()
+        self.update_debug()
 
-    # Telemetry is a window title, so it only has to keep up with the eye.
-    # Rebuilding it every frame cost 0.9 ms at render distance 24, nearly all of
-    # it get_chunk_info walking every loaded chunk for the LOD histogram.
-    TITLE_INTERVAL = 0.1        # seconds
+    # The debug screen is assembled only while it is open, and then ten times a
+    # second: get_chunk_info walks every loaded chunk for the LOD histogram,
+    # which cost 0.9 ms a frame at render distance 24 back when the window title
+    # carried these numbers. Ten times a second is as fast as the eye reads them.
+    DEBUG_INTERVAL = 0.1        # seconds
 
-    def update_title(self):
-        """Window title: FPS, position, chunk and LOD counts, live triangles."""
+    def update_debug(self):
+        """Text for the F3 screen: where the player is, what they are looking
+        at, and everything the window title used to report."""
         now = time.perf_counter()
-        if now - self.last_title_update < self.TITLE_INTERVAL:
+        if not self.show_debug or now - self.last_debug_update < self.DEBUG_INTERVAL:
             return
-        self.last_title_update = now
+        self.last_debug_update = now
 
-        fps = self.clock.get_fps()
-        pos = self.camera.position
-        # The title is the only text the game can draw, so it doubles as the
-        # picker's tooltip: hovering a block names it.
-        hovered = self.hud.block_at(self.inv_hover) if self.hud.inventory_open else None
-        shown = hovered if hovered is not None else self.selected_block_type
-        selected_name = BLOCK_NAMES.get(shown, "Unknown")
-        chunk_info = self.chunk_manager.get_chunk_info()
-        chunks_loaded = chunk_info['loaded_chunks']
-        pending_chunks = chunk_info['pending_chunks']
-        cached_chunks = chunk_info['cached_chunks']
-        explored_chunks = chunk_info['explored_chunks']
-        frustum_enabled = chunk_info['frustum_culling']
+        cam = self.camera
+        pos = cam.position
+        bx, by, bz = (int(math.floor(v)) for v in (pos.x, pos.y, pos.z))
+        cx, cz = self.chunk_manager.world_to_chunk_coords(pos.x, pos.z)
+        info = self.chunk_manager.get_chunk_info()
+        look, axis = look_direction(cam.yaw)
 
-        # Include culling stats if available
-        if hasattr(self, 'rendered_chunks') and hasattr(self, 'total_chunks'):
-            culling_info = f"L:{chunks_loaded} C:{cached_chunks} E:{explored_chunks} R:{self.rendered_chunks}/{self.total_chunks}"
-            if hasattr(self, 'frustum_culled'):
-                culling_info += f" (F:{self.frustum_culled})"
+        if cam.flying:
+            mode = 'Flying'
         else:
-            culling_info = f"L:{chunks_loaded} C:{cached_chunks} E:{explored_chunks} P:{pending_chunks}"
+            mode = 'Walking' if cam.on_ground else 'In air'
+        if cam.sprinting:
+            mode += ', sprinting'
 
-        frustum_status = "FC:ON" if frustum_enabled else "FC:OFF"
+        left = (
+            'Minecraft Clone (ModernGL)',
+            f'{self.clock.get_fps():.0f} fps ({self.delta_time * 1000:.1f} ms)',
+            f'C: {self.rendered_chunks}/{self.total_chunks}   '
+            f'F: {self.frustum_culled}   T: {self.triangles / 1000:.0f}k tri',
+            f"L: {info['loaded_chunks']}   P: {info['pending_chunks']}   "
+            f"Cache: {info['cached_chunks']}   E: {info['explored_chunks']}   "
+            f"LOD: {'/'.join(str(n) for n in info['lod_counts'])}",
+            f"RD: {self.render_distance}   frustum culling: "
+            f"{'on' if info['frustum_culling'] else 'off'}   "
+            f"wireframe: {'on' if self.renderer.wireframe_mode else 'off'}",
+            '',
+            f'XYZ: {pos.x:.3f} / {pos.y:.3f} / {pos.z:.3f}',
+            f'Block: {bx} {by} {bz}',
+            f'Chunk: {bx - cx * 16} {by} {bz - cz * 16} in {cx} {cz} '
+            f'(LOD {self.chunk_manager.chunk_lod(cx, cz)})',
+            f'Facing: {look} (towards {axis})   '
+            f'({cam.yaw % 360:.1f} / {cam.pitch:.1f})',
+            f'Biome: {BIOME_NAMES[column_biome(bx, bz)]}',
+            f'{mode}   {math.hypot(cam.velocity.x, cam.velocity.z):.1f} m/s',
+            f'Held: {BLOCK_NAMES.get(self.selected_block_type, "Unknown")}',
+        )
 
-        # Chunks per detail level, then live triangles — the two numbers that
-        # say whether the LOD rings are actually doing anything.
-        lod_info = "/".join(str(count) for count in chunk_info['lod_counts'])
-        triangle_info = f"{getattr(self, 'triangles', 0) / 1000:.0f}k"
+        right = [f'Python {sys.version.split()[0]}   pygame {pg.version.ver}']
+        if _PROC is not None:
+            # cpu_percent() averages since its own previous call, and Windows
+            # counts process CPU in 15.6 ms steps: sampled ten times a second it
+            # quantises to zero. Once a second is a real number, and it is the
+            # rate these are read at anyway.
+            if now - self.last_cpu_sample >= 1.0:
+                self.last_cpu_sample = now
+                self.cpu_percent = _PROC.cpu_percent()
+            right.append(f'Mem: {_PROC.memory_info().rss >> 20} MB   '
+                         f'CPU: {self.cpu_percent:.0f}% of one core')
+            right.append(f'RAM: {_RAM().percent:.0f}% of {_RAM_MB} MB')
+        right += [f'Display: {self.renderer.width}x{self.renderer.height}',
+                  self.gpu[0], f'GL {self.gpu[1]}', '']
 
-        if self.camera.flying:
-            move_status = "FLY(SPRINT)" if self.camera.sprinting else "FLY"
+        # The raycast render() already did — one frame old, which no eye can see
+        # on a readout, and cheaper than casting the same ray twice.
+        if self.target['hit']:
+            block = int(self.target['block_type'])
+            right += ['Targeted Block: {} {} {}'.format(*self.target['block_pos']),
+                      f'{BLOCK_NAMES.get(block, "Unknown")} (id {block})']
         else:
-            move_status = "SPRINT" if self.camera.sprinting else "WALK"
-            
-        pg.display.set_caption(f'Minecraft ModernGL - FPS: {fps:.0f} | Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}) | {move_status} | Block: {selected_name} | Chunks: {culling_info} | LOD: {lod_info} | Tri: {triangle_info} | RD: {self.render_distance} | {frustum_status}')
-    
+            right.append('Targeted Block: none')
+
+        self.hud.set_debug(left, tuple(right))
+
+
     def render(self):
         """Render the game"""
         # Clear screen
@@ -455,7 +526,7 @@ class MinecraftModernGL:
         self.renderer.render_water_surface(view_matrix, self.camera.position)
         
         # Block outline – draw around the block the player is looking at
-        raycast_result = self.raycast()
+        raycast_result = self.target = self.raycast()
         if raycast_result['hit']:
             self.renderer.render_block_outline(
                 raycast_result['block_pos'], view_matrix, self.renderer.proj_matrix)
@@ -469,6 +540,10 @@ class MinecraftModernGL:
         # Creative picker sits on top of the hotbar, not instead of it
         if self.hud.inventory_open:
             self.hud.render_inventory(self.inv_hover, self.renderer.block_texture)
+
+        # Last, so it reads over the picker as well — the real F3 does the same
+        if self.show_debug:
+            self.hud.render_debug()
 
         # Swap buffers
         pg.display.flip()

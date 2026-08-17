@@ -46,6 +46,7 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 | Scroll the Block List | `Mouse Wheel` / drag the scrollbar |
 | Adjust Render Distance | `+` / `-` |
 | Toggle Frustum Culling | `F` |
+| Debug Screen (position, chunk, biome, targeted block, FPS, memory) | `F3` |
 
 ## Installation & Setup
 

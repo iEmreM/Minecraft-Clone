@@ -11,6 +11,8 @@ Nothing here needs GL. `raycast`, `add_block` and `remove_block` only touch
 so they are borrowed onto a stub world that supplies exactly those.
 """
 
+import math
+
 import main
 from main import REPLACEABLE, MinecraftModernGL
 from world.blocks import BLOCK_NAMES, FACING, LOWER, SHAPE_NAME, UPPER
@@ -120,6 +122,31 @@ def check_solids_still_stop_the_ray():
     assert player.get_block_at(0, 26, 0) == STONE, 'a placed block overwrote terrain'
 
 
+def check_the_debug_compass():
+    """The F3 screen names the direction the eye is really pointing.
+
+    `Camera.yaw` is 0 down +X and turns toward +Z, while FACING_NAMES starts at
+    -Z. A compass off by a quarter turn still reads plausibly and sends the
+    player the wrong way, so the axis is checked against the front vector the
+    camera itself builds rather than against a second copy of the table.
+    """
+    seen = set()
+    for yaw in (0.0, 90.0, 180.0, 270.0, -90.0, 720.5):
+        name, axis = main.look_direction(yaw)
+        fx, fz = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+        want = (('+X' if fx > 0 else '-X') if abs(fx) > abs(fz)
+                else ('+Z' if fz > 0 else '-Z'))
+        assert axis == want, f'yaw {yaw}: reads {name} ({axis}), the eye is on {want}'
+        seen.add(name)
+    assert seen == set(FACING_NAMES), f'only {sorted(seen)} of the four came out'
+
+    # Where one name gives over to the next: 45 degrees off the axis, not 90.
+    assert main.look_direction(44.0)[0] == 'east', 'the arc is not centred'
+    assert main.look_direction(46.0)[0] == 'south', 'the arc is not centred'
+    print(f'debug compass: yaw 0 -> {main.look_direction(0.0)}, '
+          f'90 -> {main.look_direction(90.0)}')
+
+
 def check_the_two_readings_agree():
     """The outline and the placement have to come off the same tuple.
 
@@ -205,6 +232,7 @@ def run():
     check_solids_still_stop_the_ray()
     check_a_door_is_two_blocks()
     check_a_furnace_faces_the_player()
+    check_the_debug_compass()
     check_the_two_readings_agree()
     print('\nok')
 

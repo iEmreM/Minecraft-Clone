@@ -66,7 +66,8 @@ class ModernGLRenderer:
         # Store screen dimensions
         self.width = width
         self.height = height
-        
+        self.wireframe_mode = False
+
         # Initialize textures
         self.block_texture = None
         self.water_texture = None
@@ -364,15 +365,9 @@ class ModernGLRenderer:
             self.water_surface.render(view_matrix, self.proj_matrix, camera_pos)
             
     def toggle_wireframe(self):
-        """Toggle wireframe mode"""
-        if hasattr(self, 'wireframe_mode') and self.wireframe_mode:
-            self.ctx.wireframe = False
-            self.wireframe_mode = False
-            print("Wireframe mode: OFF")
-        else:
-            self.ctx.wireframe = True
-            self.wireframe_mode = True
-            print("Wireframe mode: ON")
+        """Toggle wireframe mode. The flag is what the debug screen reads."""
+        self.wireframe_mode = self.ctx.wireframe = not self.wireframe_mode
+        print(f"Wireframe mode: {'ON' if self.wireframe_mode else 'OFF'}")
 
     # ------------------------------------------------------------------
     # Crosshair

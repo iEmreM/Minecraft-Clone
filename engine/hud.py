@@ -195,6 +195,9 @@ class HUDRenderer:
         self._tip_rect = None
         self._query_tex = None       # what the search box shows
         self._query_shown = None
+        self._debug_left = None      # the F3 screen, one texture per column
+        self._debug_right = None
+        self._debug_shown = None
         self._mouse_px = (0, 0)
         self._fonts = {}
         self._text_vbo = ctx.buffer(reserve=6 * 4 * 4, dynamic=True)
@@ -212,6 +215,7 @@ class HUDRenderer:
         self.screen_h = screen_h
         self._build_geometry()
         self._build_inventory()
+        self._debug_shown = None    # same text, new font size and new corners
 
     def set_query(self, query: str):
         """Type into the search box. Empty string shows the current tab again."""
@@ -785,6 +789,70 @@ class HUDRenderer:
         sx0, sy0, sx1, sy1 = self._search_rect
         w, h = self._query_tex.size
         self._draw_text(self._query_tex, sx0 + 8, sy0 + (sy1 - sy0 - h) / 2, w, h)
+
+    # ------------------------------------------------------------------
+    # Debug screen (F3)
+    # ------------------------------------------------------------------
+
+    DEBUG_BG = (0, 0, 0, 165)      # backdrop behind each line, as the real one has
+    DEBUG_FG = (232, 232, 232)
+
+    def set_debug(self, left, right):
+        """Put text on the F3 screen: one tuple of lines per column.
+
+        Tuples, because an unchanged screen has to cost one comparison — and the
+        text really does change ten times a second, which is why a column is one
+        texture and one quad rather than a `_TextStrip`. A strip would rebuild a
+        buffer and a VAO at that rate to place lines that a single blit has
+        already placed.
+        """
+        if (left, right) == self._debug_shown:
+            return
+        self._debug_shown = (left, right)
+        _release(self._debug_left, self._debug_right)
+        self._debug_left = self._bake_column(left)
+        self._debug_right = self._bake_column(right, right_align=True)
+
+    def _bake_column(self, lines, right_align=False):
+        """A column of debug lines, each on its own backdrop, as one texture.
+
+        An empty line is a gap — no backdrop, no text — so a column reads as
+        groups rather than as one slab of numbers.
+        """
+        font = self._font(max(18, int(self.screen_h * 0.033)))
+        pad, step = 3, font.get_linesize()
+        rendered = [font.render(text, True, self.DEBUG_FG) for text in lines]
+        width = max((s.get_width() for s in rendered), default=0) + 2 * pad
+        column = pg.Surface((max(width, 1), max(step * len(lines), 1)), pg.SRCALPHA)
+
+        for i, surf in enumerate(rendered):
+            if not lines[i]:
+                continue
+            x = width - pad - surf.get_width() if right_align else pad
+            column.fill(self.DEBUG_BG,
+                        (x - pad, i * step, surf.get_width() + 2 * pad, step))
+            column.blit(surf, (x, i * step))
+        return self._text_texture(column)
+
+    def render_debug(self):
+        """Draw the two columns in the top corners. Call after render()."""
+        if self._debug_left is None:
+            return
+
+        ctx = self.ctx
+        ctx.disable(mgl.DEPTH_TEST)
+        ctx.disable(mgl.CULL_FACE)
+        ctx.enable(mgl.BLEND)
+        ctx.blend_func = mgl.SRC_ALPHA, mgl.ONE_MINUS_SRC_ALPHA
+        self._set_offset(0.0)
+
+        for tex, right in ((self._debug_left, False), (self._debug_right, True)):
+            w, h = tex.size
+            self._draw_text(tex, self.screen_w - w if right else 0,
+                            self.screen_h - h, w, h)
+
+        ctx.enable(mgl.DEPTH_TEST)
+        ctx.enable(mgl.CULL_FACE)
 
     # ------------------------------------------------------------------
     def render(self, selected_slot: int, block_texture_array):

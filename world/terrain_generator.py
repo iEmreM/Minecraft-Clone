@@ -1293,7 +1293,7 @@ def find_spawn(world_x=8, world_z=8, reach=3000):
             z = int(world_z + radius * math.sin(angle))
             height = surface_height(x, z)
             if height > SEA_LEVEL + 1 and column_biome(x, z) != RIVER:
-                return x + 0.5, height + 3.0, z + 0.5
+                return x + 0.5, height + 4.0, z + 0.5
         radius += step
     return world_x, SEA_LEVEL + 4.0, world_z
 
