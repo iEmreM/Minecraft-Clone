@@ -47,6 +47,21 @@ A comprehensive voxel-based engine built with Python, delivering a Minecraft-lik
 | Adjust Render Distance | `+` / `-` |
 | Toggle Frustum Culling | `F` |
 | Debug Screen (position, chunk, biome, targeted block, FPS, memory) | `F3` |
+| Command Console | `T`, or `/` to open it with the slash already typed |
+| Run / Cancel a Command | `Enter` / `ESC` (`↑` `↓` recall earlier lines) |
+
+## Commands
+
+`T` opens a console like the real game's. `/help` lists what is there;
+[COMMANDS.md](./COMMANDS.md) documents all of it, including how to add more.
+
+| | |
+| :--- | :--- |
+| `/tp <x> <y> <z>` | Teleport. Leave `y` out to land on the surface; `~` and `~12` are relative, as in the real game. The destination chunk is generated before you arrive, so you land on solid ground rather than falling through unloaded world. |
+| `/locate <biome>` | Find the nearest column of a biome and go there. Partial names work — `birch`, `jagged`, `deep_ocean` — and `/locate list` names all 26. |
+| `/biome` | Name the biome you are standing in. |
+| `/set [name] [value]` | Read or change anything a shortcut key changes: render distance, flight, frustum culling, wireframe, the debug screen. |
+| `/help [command]` | The list, or one command in detail. |
 
 ## Installation & Setup
 
@@ -101,6 +116,7 @@ Minecraft-Clone/
 ├── world/                  # Voxel generation, chunk management, multi-threading
 │   └── blocks.py           # Block registry — id, name, per-face texture, hotbar
 ├── main.py                 # Application entry point and game loop
+├── commands.py             # The console's commands — /tp, /locate, /set, /help
 ├── build_atlas.py          # Bakes texture.png from the block registry (dev tool)
 ├── requirements.txt        # Python dependency manifest
 ├── texture.png             # Block texture array: 16x16 tiles in one column

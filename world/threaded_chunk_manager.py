@@ -450,12 +450,19 @@ class ThreadedChunkManager:
                 for dx, dz in self._range_offsets()}
 
     def _is_out_of_range(self, chunk_x, chunk_z):
-        """True if this chunk sits outside the current render distance."""
-        if self.last_player_chunk is None:
-            return False
+        """True if this chunk sits outside the current render distance.
 
-        dx = chunk_x - self.last_player_chunk[0]
-        dz = chunk_z - self.last_player_chunk[1]
+        `last_player_chunk` is None for a frame after a render distance change,
+        and falling back to "in range" there was survivable while this only
+        decided whether to keep an arriving chunk. It is not survivable for
+        unload_chunk_immediate, which would drop the request outright and leave
+        the chunk loaded until the player next crossed a boundary. The live
+        position answers the same question in every state.
+        """
+        center = (self.last_player_chunk if self.last_player_chunk is not None
+                  else self.get_player_chunk(self.player_position))
+        dx = chunk_x - center[0]
+        dz = chunk_z - center[1]
         return dx * dx + dz * dz > self.render_distance ** 2
     
     def request_chunk_load(self, chunk_x, chunk_z):
@@ -470,6 +477,48 @@ class ThreadedChunkManager:
             return True
         return False
     
+    def ensure_chunk(self, chunk_x, chunk_z):
+        """Build one chunk right now, on the calling (main) thread.
+
+        For teleports. Loading is asynchronous and `get_block_at` reads air
+        wherever no chunk has arrived, so a player set down in unexplored
+        terrain falls through the world until the queue reaches them — which,
+        having just jumped a few thousand blocks, is a queue with every chunk
+        around the destination already in it. One synchronous generate is about
+        0.2 ms and the mesh follows the ordinary way, so the chunk is solid on
+        the frame the player lands and visible a few frames later.
+
+        A chunk that is merely *pending* is built anyway. "A frame or two away"
+        holds for an idle queue and not for the case that matters — a render
+        distance change or a long jump has just filled the queue with hundreds
+        of chunks, and the one under the player is somewhere in the middle of
+        it. `process_completed_chunks` drops the worker's copy when it lands on
+        a chunk that is already here, so the duplicate costs the terrain pass
+        and nothing else; the worker's chunk holds no GL objects yet.
+        """
+        if (chunk_x, chunk_z) in self.chunks:
+            return False
+
+        chunk = (self.load_chunk_from_cache(chunk_x, chunk_z)
+                 or ModernChunk(chunk_x, chunk_z, self.renderer, chunk_manager=self))
+        with self.thread_lock:
+            self.chunks[(chunk_x, chunk_z)] = chunk
+        self._draw_list_dirty = True
+        self.loaded_chunks.add((chunk_x, chunk_z))
+        with self.cache_lock:
+            self.explored_chunks.add((chunk_x, chunk_z))
+
+        self.request_mesh(chunk_x, chunk_z, chunk)
+
+        # This chunk now closes off the seam its neighbors were meshed against,
+        # exactly as in process_completed_chunks. A no-op for the ones that are
+        # not loaded, which after a long jump is all four of them.
+        self.request_mesh(chunk_x - 1, chunk_z)
+        self.request_mesh(chunk_x + 1, chunk_z)
+        self.request_mesh(chunk_x, chunk_z - 1)
+        self.request_mesh(chunk_x, chunk_z + 1)
+        return True
+
     def request_chunk_unload(self, chunk_x, chunk_z):
         """Request a chunk to be unloaded"""
         if (chunk_x, chunk_z) in self.chunks:
@@ -500,6 +549,15 @@ class ThreadedChunkManager:
                     # crossing happened to notice. Let it go here instead.
                     if self._is_out_of_range(chunk_x, chunk_z):
                         self.loaded_chunks.discard((chunk_x, chunk_z))
+                        processed += 1
+                        continue
+
+                    # Or a teleport built it here while the worker was busy —
+                    # see ensure_chunk. Dropping the newcomer rather than
+                    # letting it overwrite is what keeps the GL objects of the
+                    # one the player is standing on from leaking; this one has
+                    # none of its own yet.
+                    if (chunk_x, chunk_z) in self.chunks:
                         processed += 1
                         continue
 
@@ -560,7 +618,19 @@ class ThreadedChunkManager:
         return processed, unload_count
     
     def unload_chunk_immediate(self, chunk_x, chunk_z):
-        """Immediately unload a chunk (called from main thread)"""
+        """Immediately unload a chunk (called from main thread).
+
+        An unload travels chunk_queue -> worker -> chunks_to_unload before it
+        gets here, and a teleport queues one for every chunk of the disc it just
+        left. Come back inside that window — teleport away and straight back —
+        and the request would delete the ground under the player, with nothing
+        to reload it until they next crossed a chunk boundary. So the range is
+        re-checked on arrival, the mirror of the check process_completed_chunks
+        makes on a chunk that left the distance while it was being generated.
+        """
+        if not self._is_out_of_range(chunk_x, chunk_z):
+            return False
+
         if (chunk_x, chunk_z) in self.chunks:
             chunk = self.chunks[(chunk_x, chunk_z)]
             

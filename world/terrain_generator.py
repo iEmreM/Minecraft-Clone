@@ -1276,6 +1276,33 @@ def column_biome(world_x, world_z):
     return biome_at(c[3], c[4], c[0], c[1], c[2], height, alt, river)
 
 
+# Eye height above the ground a player is set down on, whether by spawning or
+# by teleporting. It is *terrain* height they land on, and a village floor or a
+# boulder can stand a block or two above that, so the clearance is a short drop
+# rather than a flush landing. Written once because it had drifted: find_spawn
+# went from 3.0 to 4.0 and test_worldgen kept asserting the old number.
+SPAWN_CLEARANCE = 4.0
+
+
+def ring_columns(origin_x, origin_z, step, reach):
+    """Columns in rings of growing radius, ~*step* apart along each ring.
+
+    A search that wants the *nearest* column satisfying something walks this and
+    stops at the first hit, so it pays for the rings up to that column rather
+    than for the whole disc. Both such searches use it — `find_spawn` here and
+    `commands.nearest_biome` — because they had drifted into two copies of the
+    same loop with different constants and only the predicates differing.
+    """
+    radius = 0
+    while radius <= reach:
+        points = max(1, int(radius / step) * 6)
+        for i in range(points):
+            angle = 2.0 * math.pi * i / points
+            yield (int(origin_x + radius * math.cos(angle)),
+                   int(origin_z + radius * math.sin(angle)))
+        radius += step
+
+
 def find_spawn(world_x=8, world_z=8, reach=3000):
     """Eye position for a player starting near (world_x, world_z).
 
@@ -1283,19 +1310,11 @@ def find_spawn(world_x=8, world_z=8, reach=3000):
     world is sea, so the fixed start the game used to have now lands on a sea
     bed about that often.
     """
-    step = 24
-    radius = 0
-    while radius <= reach:
-        points = max(1, int(radius / step) * 6)
-        for i in range(points):
-            angle = 2.0 * math.pi * i / points
-            x = int(world_x + radius * math.cos(angle))
-            z = int(world_z + radius * math.sin(angle))
-            height = surface_height(x, z)
-            if height > SEA_LEVEL + 1 and column_biome(x, z) != RIVER:
-                return x + 0.5, height + 4.0, z + 0.5
-        radius += step
-    return world_x, SEA_LEVEL + 4.0, world_z
+    for x, z in ring_columns(world_x, world_z, 24, reach):
+        height = surface_height(x, z)
+        if height > SEA_LEVEL + 1 and column_biome(x, z) != RIVER:
+            return x + 0.5, height + SPAWN_CLEARANCE, z + 0.5
+    return world_x, SEA_LEVEL + SPAWN_CLEARANCE, world_z
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ from world.terrain_generator import BIOME_NAMES, column_biome, find_spawn
 from world.shapes import FACING_NAMES
 import glm
 import math
+import commands
 from engine.hud import HUDRenderer, HOTBAR_SLOTS
 
 try:                                   # the debug screen's memory and CPU lines
@@ -29,6 +30,12 @@ REPLACEABLE = (AIR, WATER)
 
 # Which world axis each compass name points along, for the debug screen.
 LOOK_AXIS = {'north': '-Z', 'east': '+X', 'south': '+Z', 'west': '-X'}
+
+# What opens the command console. `/` is a *key*, and on a layout where the
+# slash is not a bare key press — a Turkish Q keyboard, for one — that key press
+# never arrives; T always does, and the slash can be typed inside. The numpad
+# divide is there because it is the same character on every layout.
+CONSOLE_KEYS = (pg.K_t, pg.K_SLASH, pg.K_KP_DIVIDE)
 
 
 def look_direction(yaw):
@@ -104,9 +111,19 @@ class MinecraftModernGL:
         # HUD / hotbar (must be created after renderer/ctx is ready)
         self.hud = HUDRenderer(self.renderer.ctx, self.renderer.width, self.renderer.height)
         self.inv_hover = -1        # creative grid index under the mouse
-        self._was_captured = True  # mouse state to restore when the picker closes
+        self._was_captured = True  # mouse state to restore when a window closes
         self._swallow_text = False # drop the TEXTINPUT of the key that opened it
         self.dragging_scrollbar = False
+
+        # Command console (T, or / for a line with the slash already in it).
+        # The picker and the console both take the whole keyboard, so they can
+        # never be open at once and share _was_captured / _swallow_text.
+        self.console_open = False
+        self.console_text = ''
+        self.console_log = []      # (text, colour, time it was printed)
+        self.console_history = []  # submitted lines, oldest first
+        self.console_at = 0        # where UP/DOWN has walked back to in it
+        self.console_draft = ''    # the line UP was pressed from, to come back to
 
         print("Minecraft ModernGL initialized successfully!")
         print("Controls:")
@@ -126,6 +143,8 @@ class MinecraftModernGL:
         print("- +/-: Increase/Decrease render distance")
         print("- F: Toggle frustum culling")
         print("- F3: Debug screen — position, chunk, biome, target, FPS, memory")
+        print("- T or /: Command console — /help lists the commands,")
+        print("     /tp teleports, /locate finds a biome, /set changes a setting")
         print("")
         print("Physics: Gravity, jumping, and block collision enabled!")
         print("Walking speed: 5 blocks/sec, Flying speed: 15 blocks/sec")
@@ -176,51 +195,59 @@ class MinecraftModernGL:
             if event.type == pg.QUIT:
                 self.running = False
             
-            # Every printable key belongs to the picker's search box while it is
-            # open, so the picker takes the whole keyboard: E types an 'e' there
-            # instead of closing the window, and ESC is the way out.
-            elif event.type == pg.TEXTINPUT and self.hud.inventory_open:
-                # The E that opened the window arrives as KEYDOWN *and* as the
-                # TEXTINPUT right behind it, by which time the picker is already
-                # open — swallow that one so the box does not start with an 'e'.
+            # Every printable key belongs to the picker's search box or to the
+            # console while one of them is open: E types an 'e' there instead of
+            # closing the window, and ESC is the way out of both.
+            elif event.type == pg.TEXTINPUT and (self.console_open
+                                                 or self.hud.inventory_open):
+                # The key that opened the window arrives as KEYDOWN *and* as the
+                # TEXTINPUT right behind it, by which time the window is already
+                # open — swallow that one, or the search box starts with an 'e'
+                # and the console with a second slash.
                 if self._swallow_text:
                     self._swallow_text = False
+                elif self.console_open:
+                    self.console_text += event.text
                 else:
                     self.hud.set_query(self.hud.query + event.text)
                     self.inv_hover = self.hud.hit_test(*pg.mouse.get_pos())
 
             elif event.type == pg.KEYDOWN:
-                if event.key == pg.K_ESCAPE:
+                # F3 first on purpose: it is not a printable key, so it belongs
+                # to the game even while the search box or the console has the
+                # rest of the keyboard.
+                if event.key == pg.K_F3:
+                    self.show_debug = not self.show_debug
+                elif self.console_open:
+                    self.console_key(event.key)
+                elif event.key == pg.K_ESCAPE:
                     if self.hud.inventory_open:
                         self.toggle_inventory()
                     else:
                         self.toggle_mouse_capture()
-                # Above the picker's branch on purpose: F3 is not a printable
-                # key, so it belongs to the game even while the search box has
-                # the rest of the keyboard.
-                elif event.key == pg.K_F3:
-                    self.show_debug = not self.show_debug
                 elif self.hud.inventory_open:
                     if event.key == pg.K_BACKSPACE:
                         self.hud.set_query(self.hud.query[:-1])
                         self.inv_hover = self.hud.hit_test(*pg.mouse.get_pos())
                 elif event.key == pg.K_e:
                     self.toggle_inventory()
+                # T opens an empty line, / opens one with the slash already in
+                # it — the real game's split, kept because every command here
+                # starts with a slash and typing it twice is the usual slip.
+                # Not with Ctrl or Alt held: those chords send no TEXTINPUT, so
+                # the swallow set on opening would eat the first real character
+                # typed instead of the one that opened the window.
+                elif (event.key in CONSOLE_KEYS
+                      and not event.mod & (pg.KMOD_CTRL | pg.KMOD_ALT | pg.KMOD_GUI)):
+                    self.open_console('' if event.key == pg.K_t else '/')
                 elif pg.K_1 <= event.key <= pg.K_1 + HOTBAR_SLOTS - 1:
                     self.select_slot(event.key - pg.K_1)
-                # Render distance controls
-                elif event.key == pg.K_EQUALS or event.key == pg.K_KP_PLUS:  # + key
-                    new_distance = min(self.render_distance + 1, 96)  # Max 96 chunks
-                    if new_distance != self.render_distance:
-                        self.render_distance = new_distance
-                        self.chunk_manager.set_render_distance(new_distance)
-                        print(f"Render distance increased to: {new_distance}")
-                elif event.key == pg.K_MINUS or event.key == pg.K_KP_MINUS:  # - key
-                    new_distance = max(self.render_distance - 1, 2)  # Min 2 chunks
-                    if new_distance != self.render_distance:
-                        self.render_distance = new_distance
-                        self.chunk_manager.set_render_distance(new_distance)
-                        print(f"Render distance decreased to: {new_distance}")
+                # Render distance controls. /set renderdistance is the same
+                # setter, so the two cannot disagree about the limits.
+                elif event.key == pg.K_EQUALS or event.key == pg.K_KP_PLUS:
+                    self.step_render_distance(1)
+                elif event.key == pg.K_MINUS or event.key == pg.K_KP_MINUS:
+                    self.step_render_distance(-1)
                 elif event.key == pg.K_f:  # F key to toggle frustum culling
                     self.chunk_manager.toggle_frustum_culling()
                 elif event.key == pg.K_TAB:  # TAB key to toggle flying mode
@@ -231,7 +258,10 @@ class MinecraftModernGL:
                 elif event.key == pg.K_k:  # K key to toggle wireframe
                     self.renderer.toggle_wireframe()
             
-            elif event.type == pg.MOUSEBUTTONDOWN:
+            # The console holds the cursor as well as the keyboard: a click
+            # would otherwise recapture the mouse and leave the line hanging
+            # open with no way to see what you were typing at.
+            elif event.type == pg.MOUSEBUTTONDOWN and not self.console_open:
                 if self.hud.inventory_open:
                     if event.button == 1:
                         self.click_picker(event.pos)
@@ -263,7 +293,11 @@ class MinecraftModernGL:
                 if self.hud.inventory_open:
                     self.hud.scroll_by(-event.y * self.hud.scroll_step)
                     self.inv_hover = self.hud.hit_test(*pg.mouse.get_pos())
-                else:
+                elif not self.console_open:
+                    # The console holds the cursor too, and its box is drawn
+                    # right where the hotbar is: a nudge of the wheel while
+                    # typing would retarget the slot invisibly, and the next
+                    # right-click would place a block nobody chose.
                     self.select_slot((self.hotbar_slot - event.y) % HOTBAR_SLOTS)
 
             elif event.type == pg.VIDEORESIZE:
@@ -347,6 +381,94 @@ class MinecraftModernGL:
             if self._was_captured:
                 self.capture_mouse()
 
+    # ------------------------------------------------------------------
+    # Command console — see commands.py for the commands themselves
+    # ------------------------------------------------------------------
+
+    CONSOLE_LINES = 8        # scrollback shown while the console is open
+    CONSOLE_LINGER = 8.0     # seconds a printed line stays up after it closes
+
+    def step_render_distance(self, delta):
+        """The + and - keys. `/set renderdistance` is the same setter, and the
+        limits live with it rather than in two places that can drift."""
+        commands.set_render_distance(
+            self, min(max(self.render_distance + delta, commands.RENDER_MIN),
+                      commands.RENDER_MAX))
+
+    def open_console(self, prefill=''):
+        """Take the keyboard and the mouse, as the picker does, and hand both
+        back in the state they were found in."""
+        self.console_open = True
+        self.console_text = self.console_draft = prefill
+        self.console_at = len(self.console_history)
+        self._swallow_text = True
+        self._was_captured = self.mouse_captured
+        self.release_mouse()
+
+    def close_console(self):
+        self.console_open = False
+        self.console_text = ''
+        if self._was_captured:
+            self.capture_mouse()
+
+    def console_key(self, key):
+        """The non-printable half of the console's keyboard; the printable half
+        arrives as TEXTINPUT, which is the only way to get a layout's own
+        characters out of pygame."""
+        if key in (pg.K_RETURN, pg.K_KP_ENTER):
+            self.submit_console()
+        elif key == pg.K_ESCAPE:
+            self.close_console()
+        elif key == pg.K_BACKSPACE:
+            self.console_text = self.console_text[:-1]
+        elif key == pg.K_UP:
+            self.recall_console(-1)
+        elif key == pg.K_DOWN:
+            self.recall_console(1)
+
+    def recall_console(self, delta):
+        """UP and DOWN walk back through what has been submitted; one past the
+        end is the line you were on before you started walking.
+
+        Kept rather than blanked, because the line you started on is often not
+        empty — `/` opens with a slash in it, and that is the one keystroke the
+        `/` opener exists to save.
+        """
+        end = len(self.console_history)
+        if delta < 0 and self.console_at == end:
+            self.console_draft = self.console_text
+        self.console_at = min(max(self.console_at + delta, 0), end)
+        self.console_text = (self.console_draft if self.console_at == end
+                             else self.console_history[self.console_at])
+
+    def submit_console(self):
+        """Run the line, keep what it printed, and close — the real game closes
+        its chat on Enter too, which is why printed lines linger afterwards."""
+        text = self.console_text.strip()
+        self.close_console()
+        if not text:
+            return
+
+        if not self.console_history or self.console_history[-1] != text:
+            self.console_history.append(text)
+
+        now = time.perf_counter()
+        self.console_log += [(line, color, now)
+                             for line, color in commands.dispatch(self, text)]
+        del self.console_log[:-self.CONSOLE_LINES]   # nothing older is reachable
+
+    def update_console(self):
+        """Hand the HUD the lines that should be on screen.
+
+        Runs every frame, because lines have to age out on their own — an
+        unchanged console is one tuple comparison inside `set_console`.
+        """
+        cutoff = time.perf_counter() - self.CONSOLE_LINGER
+        lines = [(text, color) for text, color, when in self.console_log
+                 if self.console_open or when > cutoff]
+        self.hud.set_console(
+            lines[-self.CONSOLE_LINES:],
+            '> ' + self.console_text + '|' if self.console_open else None)
 
     def process_mouse_movement(self, xoffset, yoffset):
         """Process mouse movement for camera control"""
@@ -366,9 +488,10 @@ class MinecraftModernGL:
         # Reset strafe state
         self.camera.strafe = [0, 0]
 
-        # The picker eats movement: WASD would otherwise walk the player around
-        # behind a window they cannot see past. Gravity still runs.
-        if self.hud.inventory_open:
+        # The picker and the console eat movement: WASD would otherwise walk the
+        # player around behind a window they cannot see past, or spell a command
+        # while walking. Gravity still runs.
+        if self.hud.inventory_open or self.console_open:
             self.camera.sprinting = False
             return
 
@@ -415,6 +538,7 @@ class MinecraftModernGL:
         self.chunk_manager.update(self.camera.position)
 
         self.update_debug()
+        self.update_console()
 
     # The debug screen is assembled only while it is open, and then ten times a
     # second: get_chunk_info walks every loaded chunk for the LOD histogram,
@@ -540,6 +664,9 @@ class MinecraftModernGL:
         # Creative picker sits on top of the hotbar, not instead of it
         if self.hud.inventory_open:
             self.hud.render_inventory(self.inv_hover, self.renderer.block_texture)
+
+        # Above the picker, which dims the whole screen behind it
+        self.hud.render_console()
 
         # Last, so it reads over the picker as well — the real F3 does the same
         if self.show_debug:

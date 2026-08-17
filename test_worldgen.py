@@ -28,7 +28,7 @@ from world.blocks import (BLOCK_DTYPE, BLOCK_NAMES, FACE_LAYER, LOWER, OPAQUE,
 from world.fast_builder import AIR, SEAL_COVER, build_chunk_mesh_fast, make_mesh_buffers
 from world.terrain_generator import (BIOME_NAMES, B_TREES, CAVE_ROOF,
                                      CHUNK_HEIGHT, CHUNK_SIZE, MIN_TERRAIN,
-                                     PAD, SEA_LEVEL, WATER, V_WALL,
+                                     PAD, SEA_LEVEL, SPAWN_CLEARANCE, WATER, V_WALL,
                                      TS_COUNT, column_biome, find_spawn, place_tree,
                                      surface_height, terrain_generator,
                                      village_check, village_site)
@@ -270,7 +270,7 @@ def check_spawn():
     blocks = gen(x // CHUNK_SIZE, z // CHUNK_SIZE)
     local_x, local_z = x % CHUNK_SIZE, z % CHUNK_SIZE
     ground = surface_height(x, z)
-    assert y == ground + 3.0, "find_spawn and surface_height disagree"
+    assert y == ground + SPAWN_CLEARANCE, "find_spawn and surface_height disagree"
 
     top = max(y_ for y_ in range(CHUNK_HEIGHT)
               if blocks[local_x, y_, local_z] in GROUND)

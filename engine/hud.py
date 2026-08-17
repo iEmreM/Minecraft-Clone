@@ -135,6 +135,10 @@ class HUDRenderer:
     MARGIN_PX = 8   # icon inset inside slot
     BOTTOM_PY = 14  # pixels from bottom of screen
 
+    # Where the hotbar stops. Both things that sit above it — the picker panel
+    # and the command console — start here.
+    HOTBAR_TOP_PY = BOTTOM_PY + SLOT_PX + 12
+
     # The picker is a fixed fraction of the window, not a box fitted to its
     # contents: it used to resize on every keystroke as the result count moved,
     # which reads as the window jumping around under the cursor. Fixed frame,
@@ -198,6 +202,8 @@ class HUDRenderer:
         self._debug_left = None      # the F3 screen, one texture per column
         self._debug_right = None
         self._debug_shown = None
+        self._console_tex = None     # the command console, log and input in one
+        self._console_shown = None
         self._mouse_px = (0, 0)
         self._fonts = {}
         self._text_vbo = ctx.buffer(reserve=6 * 4 * 4, dynamic=True)
@@ -216,6 +222,7 @@ class HUDRenderer:
         self._build_geometry()
         self._build_inventory()
         self._debug_shown = None    # same text, new font size and new corners
+        self._console_shown = None
 
     def set_query(self, query: str):
         """Type into the search box. Empty string shows the current tab again."""
@@ -464,7 +471,7 @@ class HUDRenderer:
         # The panel lives above the hotbar, so the hotbar stays visible and
         # usable while the picker is open — clicking an icon fills the selected
         # slot, and you can watch it land.
-        top_of_hotbar = self.BOTTOM_PY + self.SLOT_PX + 12
+        top_of_hotbar = self.HOTBAR_TOP_PY
         avail_h = max(sh - top_of_hotbar - 20, 80)
         panel_w = max(sw * self.PANEL_W_R, 240.0)
         panel_h = min(sh * self.PANEL_H_R, avail_h)
@@ -813,32 +820,43 @@ class HUDRenderer:
         self._debug_left = self._bake_column(left)
         self._debug_right = self._bake_column(right, right_align=True)
 
-    def _bake_column(self, lines, right_align=False):
-        """A column of debug lines, each on its own backdrop, as one texture.
+    def _bake_column(self, lines, right_align=False, size=None, block=False):
+        """A column of lines, each on its own backdrop, as one texture.
 
         An empty line is a gap — no backdrop, no text — so a column reads as
-        groups rather than as one slab of numbers.
+        groups rather than as one slab of numbers. A line is a bare string, or
+        `(text, colour)` where it wants its own: the F3 screen is all one
+        colour, the console prints its errors in red.
+
+        *block* squares the backdrops off at the width of the widest line. The
+        F3 screen wants them ragged, one per reading; the console is a run of
+        sentences of every length and reads as a box or as litter.
         """
-        font = self._font(max(18, int(self.screen_h * 0.033)))
+        font = self._font(size or max(18, int(self.screen_h * 0.033)))
         pad, step = 3, font.get_linesize()
-        rendered = [font.render(text, True, self.DEBUG_FG) for text in lines]
+        lines = [ln if isinstance(ln, tuple) else (ln, self.DEBUG_FG) for ln in lines]
+        rendered = [font.render(text, True, color) for text, color in lines]
         width = max((s.get_width() for s in rendered), default=0) + 2 * pad
         column = pg.Surface((max(width, 1), max(step * len(lines), 1)), pg.SRCALPHA)
 
         for i, surf in enumerate(rendered):
-            if not lines[i]:
+            if not lines[i][0]:
                 continue
             x = width - pad - surf.get_width() if right_align else pad
-            column.fill(self.DEBUG_BG,
+            column.fill(self.DEBUG_BG, (0, i * step, width, step) if block else
                         (x - pad, i * step, surf.get_width() + 2 * pad, step))
             column.blit(surf, (x, i * step))
         return self._text_texture(column)
 
-    def render_debug(self):
-        """Draw the two columns in the top corners. Call after render()."""
-        if self._debug_left is None:
-            return
+    def _blit_overlay(self, *blits):
+        """Draw baked text textures straight onto the frame: `(tex, x, y)` each,
+        y from the bottom.
 
+        One function for both overlays because they want identical GL state and
+        are drawn back to back — a blend or offset fix applied to one copy and
+        not the other shows up as the F3 screen and the console rendering
+        differently for no reason anyone can see.
+        """
         ctx = self.ctx
         ctx.disable(mgl.DEPTH_TEST)
         ctx.disable(mgl.CULL_FACE)
@@ -846,13 +864,56 @@ class HUDRenderer:
         ctx.blend_func = mgl.SRC_ALPHA, mgl.ONE_MINUS_SRC_ALPHA
         self._set_offset(0.0)
 
-        for tex, right in ((self._debug_left, False), (self._debug_right, True)):
+        for tex, x, y in blits:
             w, h = tex.size
-            self._draw_text(tex, self.screen_w - w if right else 0,
-                            self.screen_h - h, w, h)
+            self._draw_text(tex, x, y, w, h)
 
         ctx.enable(mgl.DEPTH_TEST)
         ctx.enable(mgl.CULL_FACE)
+
+    def render_debug(self):
+        """Draw the two columns in the top corners. Call after render()."""
+        if self._debug_left is None:
+            return
+        left, right = self._debug_left, self._debug_right
+        self._blit_overlay(
+            (left, 0, self.screen_h - left.size[1]),
+            (right, self.screen_w - right.size[0], self.screen_h - right.size[1]))
+
+    # ------------------------------------------------------------------
+    # Command console (T, or / for a line with the slash already in it)
+    # ------------------------------------------------------------------
+
+    CONSOLE_FG = (255, 255, 255)   # the line being typed, brighter than the log
+
+    def set_console(self, lines, entry):
+        """Put the console on screen: printed lines, plus the line being typed.
+
+        *entry* is None while the console is closed — the log still shows for a
+        few seconds after, which is the only way to read what a command
+        answered, since Enter runs it and closes the console in one keystroke.
+        """
+        key = (tuple(lines), entry)
+        if key == self._console_shown:
+            return
+        self._console_shown = key
+        _release(self._console_tex)
+        self._console_tex = None
+
+        rows = list(lines)
+        if entry is not None:
+            rows.append((entry, self.CONSOLE_FG))
+        if rows:
+            # Smaller than the F3 screen's font: a command prints sentences
+            # where the debug columns print numbers, and /set's table is the
+            # widest line in the game.
+            self._console_tex = self._bake_column(
+                rows, size=max(15, int(self.screen_h * 0.026)), block=True)
+
+    def render_console(self):
+        """Draw it just above the hotbar. Call after render()."""
+        if self._console_tex is not None:
+            self._blit_overlay((self._console_tex, 6, self.HOTBAR_TOP_PY))
 
     # ------------------------------------------------------------------
     def render(self, selected_slot: int, block_texture_array):
