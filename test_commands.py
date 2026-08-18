@@ -16,7 +16,8 @@ import math
 
 import commands
 from commands import COMMANDS, SETTINGS, dispatch
-from world.terrain_generator import BIOME_NAMES, column_biome, surface_height
+from world.terrain_generator import (BIOME_NAMES, STRUCTURES, column_biome,
+                                     surface_height)
 
 
 class Vec:
@@ -246,34 +247,81 @@ def check_the_surface_form_clears_the_ground():
     print(f'surface form: /tp 713 -486 -> {surface_height(713, -486)} + clearance')
 
 
-def check_biome_names_resolve():
-    """What a player types has to reach the biome they meant.
+def check_names_resolve():
+    """What a player types has to reach the thing they meant.
 
     Exact before substring, or `Ocean` is an ambiguity between the four names
     that contain it rather than the ocean. Ambiguity that is real is an error
     naming the candidates, not a silent pick of the first one.
+
+    Biomes and structures share the list on purpose: a future `Desert Pyramid`
+    matched in its own table first would take `/locate desert` off the biome of
+    that name. This is the assert that catches a structure being added back into
+    a namespace of its own.
     """
+    names = {('biome', i): name for i, name in enumerate(BIOME_NAMES)}
+    names.update({('structure', k): s.name for k, s in STRUCTURES.items()})
+
     for typed, want in (('Plains', 'Plains'), ('plains', 'Plains'),
                         ('Ocean', 'Ocean'), ('deep_ocean', 'Deep Ocean'),
                         ('deepocean', 'Deep Ocean'), ('birch', 'Birch Forest'),
                         ('forest', 'Forest'), ('jagged', 'Jagged Peaks'),
-                        ('BADLANDS', 'Badlands')):
-        got = BIOME_NAMES[commands.biome_id(typed)]
+                        ('BADLANDS', 'Badlands'), ('village', 'Village')):
+        got = names[commands.resolve(typed)]
         assert got == want, f'{typed!r} resolved to {got}, not {want}'
 
     # Ambiguity that is real: no exact name and more than one containing it.
     for typed in ('snowy', 'ocea', 'peaks'):
         try:
-            commands.biome_id(typed)
+            commands.resolve(typed)
         except commands.CommandError as exc:
             assert 'Which one?' in str(exc), f'{typed!r} said: {exc}'
         else:
             raise AssertionError(f'{typed!r} matched several and picked one')
 
     listed = text(say(Game(), '/locate list'))
-    for name in BIOME_NAMES:
+    for name in names.values():
         assert name in listed, f'/locate list is missing {name}'
-    print(f'names: exact beats substring, {len(BIOME_NAMES)} listed')
+    print(f'names: exact beats substring, {len(names)} listed')
+
+
+def check_locate_finds_a_real_structure():
+    """`/locate village` lands on a column a village is actually built on.
+
+    A structure is found by walking *regions*, not columns — one jittered
+    candidate every `spacing` chunks, cheap to place and expensive to check —
+    so nothing the biome sweep asserts covers it. What this catches is the
+    region walk landing on the wrong lattice (a site the generator would never
+    have placed) or sorting by region instead of by site, which would answer
+    with the second-nearest village and read perfectly plausibly.
+    """
+    for key, structure in STRUCTURES.items():
+        for start in ((0.0, 0.0), (-3050.5, 1720.5)):
+            game = Game(start[0], 80.0, start[1])
+            rows = say(game, f'/locate {key}')
+            assert not failed(rows), f'{key} from {start}: {text(rows)}'
+
+            x = int(math.floor(game.camera.position.x))
+            z = int(math.floor(game.camera.position.z))
+            assert structure.check(x, z)[0], \
+                f'{key}: landed at {x} {z}, where the generator builds none'
+            assert game.chunk_manager.ensured, f'{key}: no chunk built to land in'
+
+            # Nearest means nearest: no accepted site may sit closer than the
+            # one it answered with.
+            step = structure.spacing * 16
+            span = commands.LOCATE_REACH // step + 1
+            rx, rz = int(start[0] // step), int(start[1] // step)
+            best = min(
+                (math.hypot(sx - start[0], sz - start[1])
+                 for sx, sz in (structure.site(rx + dx, rz + dz)
+                                for dx in range(-span, span + 1)
+                                for dz in range(-span, span + 1))
+                 if structure.check(sx, sz)[0]), default=None)
+            got = math.hypot(x - start[0], z - start[1])
+            assert best is not None and got <= best + 1.0, \
+                f'{key}: went {got:.0f} blocks when one stood at {best:.0f}'
+            print(f'locate {key}: {x} {z}, {got:.0f} blocks from {start}')
 
 
 def check_locate_finds_the_real_biome():
@@ -387,8 +435,9 @@ def run():
     check_teleport_lands_where_it_says()
     check_relative_coordinates()
     check_the_surface_form_clears_the_ground()
-    check_biome_names_resolve()
+    check_names_resolve()
     check_locate_finds_the_real_biome()
+    check_locate_finds_a_real_structure()
     check_settings_round_trip()
     check_the_render_distance_setter_is_shared()
     check_the_current_biome()

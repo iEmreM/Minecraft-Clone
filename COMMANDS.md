@@ -24,6 +24,14 @@ the wheel do nothing, and the mouse comes back in the state it was found in. Wha
 screen for **8 seconds after the console closes**, which is the only way to read
 it: Enter runs the line and closes the console in the same keystroke.
 
+The console and the F3 screen are drawn in a **monospace** font (Consolas, or
+whatever `engine/hud.MONO` finds first), and both halves of that show: `/set`
+prints a space-padded table, and F3 prints numbers that are rewritten ten times
+a second. It is also the fix for the lowercase `i` — pygame's built-in
+`freesansbold` fuses the dot into the stem at these sizes, so every `i` read as
+an `l`. The console's font is the larger of the two: it prints a sentence you
+read once and dismiss, where F3 is a permanent corner readout.
+
 Errors print in red and never interrupt the game. A typo cannot crash it: every
 failure — an unknown name, an unparseable number, a bug in a command — comes
 back as a red line. The world only exists in memory, so losing the frame loop
@@ -86,30 +94,32 @@ and the fall would not stop. Teleporting into the middle of a mountain puts you
 inside it, as it does in the real game; reopen the console with `T` and `/tp`
 again, or `/set fly on`, and you are out.
 
-## `/locate` — find a biome and go there
+## `/locate` — find a biome or a structure and go there
 
 ```
-/locate <biome>
+/locate <name>
 /locate list
 ```
 
 Aliases: `/locatebiome`
 
-Searches outward from the player for the nearest column of that biome and
-teleports to it, landing on the surface exactly as `/tp <x> <z>` does. It
-reports where it went and how far that was.
+Searches outward from the player for the nearest one and teleports to it,
+landing on the surface exactly as `/tp <x> <z>` does. It reports where it went
+and how far that was.
 
 ```
 /locate jungle              → Teleported to -145 71 285   (Jungle)
                               Jungle was 320 blocks away.
+/locate village             → Teleported to -456 44 -136   (Plains)
+                              Village was 476 blocks away.
 /locate jagged              → Jagged Peaks
 /locate deep_ocean          → Deep Ocean
-/locate list                → all 26 names
+/locate list                → all 26 biomes, and the structures
 ```
 
 Names are matched leniently: case, spaces, underscores and hyphens are all
 ignored, so `Deep Ocean`, `deep_ocean` and `deepocean` are the same thing. A
-**partial** name works when only one biome contains it — `birch`, `jagged`,
+**partial** name works when only one thing contains it — `birch`, `jagged`,
 `badlands`. An exact name always wins over a partial one, so `ocean` is the
 ocean rather than an ambiguity between the four names that contain the word.
 Anything that genuinely matches several says which:
@@ -118,15 +128,22 @@ Anything that genuinely matches several says which:
 /locate snowy   → Which one? Snowy Beach, Snowy Taiga, Snowy Plains, Snowy Slopes
 ```
 
+**Biomes and structures share one namespace and one matching rule**, which is
+not tidiness. A future `Desert Pyramid` looked up in a table of its own first
+would take `/locate desert` away from the biome of that name; matched together
+the biome's exact name wins, and `pyramid` still reaches the structure.
+
 The 26 biomes are Ocean, Deep Ocean, Frozen Ocean, Warm Ocean, Beach, Snowy
 Beach, Stony Shore, River, Plains, Forest, Birch Forest, Dark Forest, Taiga,
 Snowy Taiga, Snowy Plains, Savanna, Desert, Jungle, Swamp, Badlands, Windswept
-Hills, Meadow, Grove, Snowy Slopes, Jagged Peaks and Stony Peaks.
+Hills, Meadow, Grove, Snowy Slopes, Jagged Peaks and Stony Peaks. The structures
+are **Village**.
 
-**Cost.** The sweep rings outward on a 16-block step, out to 4000 blocks, and it
-shares that ring walk with the spawn search (`terrain_generator.ring_columns`).
-The step is what decides whether a *thin* biome can be found at all — a river is
-about ten blocks across and a beach not much more.
+**Cost, a biome.** The sweep rings outward on a 16-block step, out to 4000
+blocks, and it shares that ring walk with the spawn search
+(`terrain_generator.ring_columns`). The step is what decides whether a *thin*
+biome can be found at all — a river is about ten blocks across and a beach not
+much more.
 
 A sample is about 4.5 µs. Measured from the origin, every one of the 26 biomes is
 found: the common ones in 400–1500 samples and under 10 ms, the three furthest
@@ -134,6 +151,33 @@ found: the common ones in 400–1500 samples and under 10 ms, the three furthest
 1376 blocks out. The worst case is asking for something that is not out there:
 the full sweep is ~190 000 samples, about a second, on the main thread. That
 bound is deliberate — it is what keeps a miss a hitch instead of a hang.
+
+**Cost, a structure.** Much less, because a structure is not swept for by column
+at all. There is exactly one candidate per region — 16 chunks, 256 blocks, for a
+village — so the whole 4000-block reach is 1089 candidates. Placing one is two
+hashes; they are all placed, sorted by distance, and then *checked* (climate plus
+four probe heights, the expensive half) only up to the first that stands.
+Measured, a village is 2–11 checks and **0.6 ms**, nearly all of it the hashes
+and the sort. Checking every candidate — which cannot happen for a village, and
+is what a much rarer structure would cost — is 3.8 ms.
+
+### Adding a structure
+
+`/locate` reads `terrain_generator.STRUCTURES`, and a row there is all a new
+building type needs to become findable — no command, no name list, no help text:
+
+```python
+STRUCTURES = {
+    'village': Structure('Village', VILLAGE_SPACING, village_site, village_check),
+}
+```
+
+`site(region_x, region_z)` returns the world column the structure would stand on
+in that region, and `check(x, z)` returns a tuple whose **first item** says
+whether it really does (whatever else the generator wants out of it rides behind,
+unread by the search). That is how villages were already placed, and how the
+reference places all of its structures, so the search is a walk over regions
+rather than over columns.
 
 ## `/biome` — what am I standing in
 
@@ -271,8 +315,9 @@ python test_commands.py
 ```
 
 Registry completeness, the teleport landing where it says it did, `~` relative
-coordinates, the surface form clearing the ground, biome names resolving exactly
-before partially, **all 26 biomes actually being findable**, every setting
-reading back what was written through the game's own toggles, and a list of
-malformed lines that all have to come back as red text rather than as an
-exception.
+coordinates, the surface form clearing the ground, names resolving exactly before
+partially across both namespaces, **all 26 biomes actually being findable**,
+`/locate village` landing on a column the generator really builds one on and on
+the *nearest* such column, every setting reading back what was written through
+the game's own toggles, and a list of malformed lines that all have to come back
+as red text rather than as an exception.

@@ -31,9 +31,9 @@ two cannot drift apart.
 import math
 from collections import namedtuple
 
-from world.modern_chunk import CHUNK_HEIGHT
-from world.terrain_generator import (BIOME_NAMES, SPAWN_CLEARANCE, column_biome,
-                                     ring_columns, surface_height)
+from world.modern_chunk import CHUNK_HEIGHT, CHUNK_SIZE
+from world.terrain_generator import (BIOME_NAMES, SPAWN_CLEARANCE, STRUCTURES,
+                                     column_biome, ring_columns, surface_height)
 
 # Colours the console prints in. Grey for the echo of what was typed, so a
 # scrollback reads as a conversation rather than as a wall of answers.
@@ -51,15 +51,16 @@ RENDER_MIN, RENDER_MAX = 2, 96
 # block or two above it, so both want the same short drop rather than a flush
 # landing.
 
-# How `/locate` sweeps. Rings outward from the player, ~4.5 us a sample, so an
-# ordinary biome costs a few thousand samples and a few milliseconds; the worst
-# case — asking for something that is not out there — is the full ~190 000 and
-# about a second.
+# How far `/locate` looks, for a biome and for a structure alike. A biome is
+# swept in rings of columns at ~4.5 us a sample, so an ordinary one costs a few
+# thousand samples and a few milliseconds; the worst case — asking for something
+# that is not out there — is the full ~190 000 and about a second.
 #
 # The step is what decides whether a *thin* biome can be found at all: a river
 # is about ten blocks across and a beach not much more, so sampling every 24
 # blocks (which is what `find_spawn` does, and it only wants dry land) steps
-# straight over them.
+# straight over them. A structure is not swept this way at all — see
+# `nearest_structure`.
 LOCATE_STEP = 16
 LOCATE_REACH = 4000
 
@@ -214,36 +215,45 @@ def _tp(game, args):
 
 
 # ---------------------------------------------------------------------------
-# Biomes
+# Biomes and structures — the two things `/locate` can find
 # ---------------------------------------------------------------------------
 
 def _norm(name):
-    """A biome name reduced to what a player is likely to type: `Deep Ocean`,
+    """A name reduced to what a player is likely to type: `Deep Ocean`,
     `deep_ocean` and `deepocean` all come out the same."""
     return ''.join(ch for ch in name.lower() if ch.isalnum())
 
 
-def biome_id(text):
-    """The biome a typed name means.
+def resolve(text):
+    """What a typed name means: `('biome', id)` or `('structure', key)`.
 
     Exact match first, so `Ocean` is the ocean rather than an ambiguity between
     the four that have the word in them; then a substring, so `birch` is enough
     for the birch forest. Anything matching two or more says which.
+
+    Biomes and structures are matched **together**, against one list, and that
+    is not tidiness — the two really do collide. A `Desert Pyramid` looked up in
+    its own table first would take `/locate desert` away from the biome of that
+    name; matched together the biome's exact name wins, and `pyramid` still
+    reaches the structure.
     """
     key = _norm(text)
     if not key:
-        raise CommandError('Give a biome name.   (try /locate list)')
+        raise CommandError('Give a biome or structure name.   (try /locate list)')
 
-    for i, name in enumerate(BIOME_NAMES):
+    rows = ([('biome', i, name) for i, name in enumerate(BIOME_NAMES)]
+            + [('structure', k, s.name) for k, s in STRUCTURES.items()])
+    for kind, value, name in rows:
         if _norm(name) == key:
-            return i
+            return kind, value
 
-    hits = [i for i, name in enumerate(BIOME_NAMES) if key in _norm(name)]
+    hits = [row for row in rows if key in _norm(row[2])]
     if not hits:
-        raise CommandError(f'No biome called "{text}".   (try /locate list)')
+        raise CommandError(f'Nothing called "{text}".   (try /locate list)')
     if len(hits) > 1:
-        raise CommandError('Which one? ' + ', '.join(BIOME_NAMES[i] for i in hits))
-    return hits[0]
+        raise CommandError('Which one? ' + ', '.join(row[2] for row in hits))
+    kind, value, _ = hits[0]
+    return kind, value
 
 
 def nearest_biome(biome, origin_x, origin_z):
@@ -259,28 +269,66 @@ def nearest_biome(biome, origin_x, origin_z):
     return None
 
 
-@command('locate <biome>',
-         'Teleport to the nearest column of a biome. Partial names work '
-         f'(birch, jagged); /locate list names all {len(BIOME_NAMES)}.',
+def nearest_structure(key, origin_x, origin_z):
+    """The nearest site of a structure, or None if there is none within reach.
+
+    A structure is not hunted the way a biome is. There is exactly one candidate
+    per region — 16 chunks, 256 blocks, for a village — and `site` is two hashes,
+    so the whole reach is 1089 of them: generate them all, sort by distance, and
+    pay the expensive half (`check`, which reads the climate and four probe
+    heights) only until the first candidate that stands.
+
+    That makes it far cheaper than the biome sweep rather than merely different.
+    Measured, a village is 2 to 11 checks and **0.6 ms**, nearly all of it the
+    thousand hashes and the sort; even checking every candidate — which cannot
+    happen for a village, and is what a rarer structure would cost — is 3.8 ms.
+    """
+    structure = STRUCTURES[key]
+    step = structure.spacing * CHUNK_SIZE
+    span = LOCATE_REACH // step + 1
+    rx, rz = int(math.floor(origin_x / step)), int(math.floor(origin_z / step))
+
+    sites = sorted((math.hypot(x - origin_x, z - origin_z), x, z)
+                   for x, z in (structure.site(rx + dx, rz + dz)
+                                for dx in range(-span, span + 1)
+                                for dz in range(-span, span + 1)))
+    for distance, x, z in sites:
+        if distance > LOCATE_REACH:
+            break
+        if structure.check(x, z)[0]:
+            return x, z
+    return None
+
+
+@command('locate <name>',
+         'Teleport to the nearest biome or structure of that name. Partial '
+         f'names work (birch, jagged); /locate list names all {len(BIOME_NAMES)} '
+         'biomes and every structure.',
          aliases=('locatebiome',))
 def _locate(game, args):
     if not args:
-        raise CommandError('Give a biome name.   (try /locate list)')
+        raise CommandError('Give a biome or structure name.   (try /locate list)')
     if len(args) == 1 and args[0].lower() == 'list':
-        return [f'The {len(BIOME_NAMES)} biomes:'] + [
-            ', '.join(BIOME_NAMES[i:i + 4]) for i in range(0, len(BIOME_NAMES), 4)]
+        return ([f'The {len(BIOME_NAMES)} biomes:']
+                + [', '.join(BIOME_NAMES[i:i + 4])
+                   for i in range(0, len(BIOME_NAMES), 4)]
+                + ['Structures: '
+                   + ', '.join(s.name for s in STRUCTURES.values())])
 
-    want = biome_id(' '.join(args))
+    kind, want = resolve(' '.join(args))
     pos = game.camera.position
-    found = nearest_biome(want, int(math.floor(pos.x)), int(math.floor(pos.z)))
+    ox, oz = int(math.floor(pos.x)), int(math.floor(pos.z))
+    if kind == 'structure':
+        label, found = STRUCTURES[want].name, nearest_structure(want, ox, oz)
+    else:
+        label, found = BIOME_NAMES[want], nearest_biome(want, ox, oz)
+
     if found is None:
-        raise CommandError(f'No {BIOME_NAMES[want]} within '
-                           f'{LOCATE_REACH} blocks of here.')
+        raise CommandError(f'No {label} within {LOCATE_REACH} blocks of here.')
 
     x, z = found
     distance = math.hypot(x - pos.x, z - pos.z)
-    return [teleport(game, x, z),
-            f'{BIOME_NAMES[want]} was {distance:.0f} blocks away.']
+    return [teleport(game, x, z), f'{label} was {distance:.0f} blocks away.']
 
 
 @command('biome', 'Name the biome the player is standing in.')

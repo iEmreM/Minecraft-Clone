@@ -20,6 +20,23 @@ from world.blocks import (BLOCK_NAMES, CREATIVE, GROUPS, HOTBAR_DEFAULT,
 
 HOTBAR_SLOTS = len(HOTBAR_DEFAULT)
 
+# The two text overlays — the F3 screen and the command console — are fixed
+# pitch, and both halves of that are visible: `/set` prints a space-padded table
+# and F3 prints numbers that are rewritten ten times a second, neither of which
+# lines up in a proportional font.
+#
+# It is also what fixes the lowercase `i`. pygame's built-in `freesansbold`
+# fuses the dot into the stem at the sizes a HUD uses — measured, `i` at 18 and
+# 20 px is a single unbroken run of ink with no gap in it, so every `i` reads as
+# an `l` — and at the larger sizes the gap is one faint row. `SysFont` falls
+# back to that same built-in font when none of these exist, which is exactly
+# where we were.
+#
+# Consolas is about 1.5x the height of freesansbold at the same nominal size
+# (23 px against 16) and 1.6x the width, so the size numbers that go with it are
+# not the ones that went with the old font.
+MONO = 'consolas,dejavusansmono,liberationmono,couriernew,menlo,monospace'
+
 # The picker's tab row: one page per category, plus an "everything" page that
 # search results also land on.
 ALL_TAB = 'Tümü'
@@ -373,12 +390,14 @@ class HUDRenderer:
     # Text
     # ------------------------------------------------------------------
 
-    def _font(self, size):
-        """pygame's built-in font at *size*, cached — the search box rebuilds
-        its text on every keystroke and Font() is not cheap."""
-        font = self._fonts.get(size)
+    def _font(self, size, name=None):
+        """A font at *size*, cached — the search box rebuilds its text on every
+        keystroke and Font() is not cheap. *name* is a family for `SysFont`, or
+        None for pygame's built-in one; see MONO for who wants which."""
+        font = self._fonts.get((name, size))
         if font is None:
-            font = self._fonts[size] = pg.font.Font(None, size)
+            font = self._fonts[(name, size)] = (
+                pg.font.SysFont(name, size) if name else pg.font.Font(None, size))
         return font
 
     def _text_texture(self, surface):
@@ -832,8 +851,9 @@ class HUDRenderer:
         F3 screen wants them ragged, one per reading; the console is a run of
         sentences of every length and reads as a box or as litter.
         """
-        font = self._font(size or max(18, int(self.screen_h * 0.033)))
-        pad, step = 3, font.get_linesize()
+        font = self._font(size or max(14, int(self.screen_h * 0.022)), MONO)
+        step = font.get_linesize()
+        pad = max(3, step // 6)
         lines = [ln if isinstance(ln, tuple) else (ln, self.DEBUG_FG) for ln in lines]
         rendered = [font.render(text, True, color) for text, color in lines]
         width = max((s.get_width() for s in rendered), default=0) + 2 * pad
@@ -904,11 +924,14 @@ class HUDRenderer:
         if entry is not None:
             rows.append((entry, self.CONSOLE_FG))
         if rows:
-            # Smaller than the F3 screen's font: a command prints sentences
-            # where the debug columns print numbers, and /set's table is the
-            # widest line in the game.
+            # Larger than the F3 screen's font, which is the other way round
+            # from how it started. A command prints a sentence you read once and
+            # dismiss, so it wants to be legible at a glance; F3 is a permanent
+            # corner readout and wants to stay out of the way. The ceiling is
+            # /set's table, the widest line in the game — at this size it is
+            # about 60% of a 1280-wide window.
             self._console_tex = self._bake_column(
-                rows, size=max(15, int(self.screen_h * 0.026)), block=True)
+                rows, size=max(18, int(self.screen_h * 0.028)), block=True)
 
     def render_console(self):
         """Draw it just above the hotbar. Call after render()."""

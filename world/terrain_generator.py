@@ -35,6 +35,7 @@ invalidate it when they change. Delete `world/__pycache__`.
 """
 
 import math
+from collections import namedtuple
 
 import numpy as np
 from numba import njit
@@ -1973,6 +1974,21 @@ def village_check(vx, vz):
             return False, 0, 0
 
     return True, centre + 1, B_VILLAGE_STYLE[biome]
+
+
+# Every structure in this world is placed the way the reference places its own:
+# one candidate per region of *spacing* chunks, jittered inside it by `site`,
+# which `check` then accepts or rejects. That is a search over regions rather
+# than over columns, so `/locate` cannot use the biome sweep — and one row here
+# is the whole of what a new building type needs to become findable.
+#
+# `check` returns a tuple whose first item is the yes/no; whatever else the
+# generator wants out of it rides behind, unread by the search.
+Structure = namedtuple('Structure', 'name spacing site check')
+
+STRUCTURES = {
+    'village': Structure('Village', VILLAGE_SPACING, village_site, village_check),
+}
 
 
 @njit(nogil=True, fastmath=True, cache=True)
